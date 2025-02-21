@@ -20,12 +20,12 @@ const isCreditsPage = Astro.url.pathname === '/credits';
 
 // Add the announcement configuration
 const announcement = {
-  message: "You can add your own custom feeds!",
-  type: "info" as const,
+  message: "Custom feeds are currently broken. I am currently looking into the issue.",
+  type: "warning" as const,
   dismissible: true,
   link: {
-    text: "Try it now",
-    url: "/custom"
+    text: "Follow updates here",
+    url: "https://status-6cv.pages.dev/"
   }
 };
 ---
