@@ -11,7 +11,8 @@ export default defineConfig({
   integrations: [tailwind()],
   vite: {
     define: {
-      'process.env.REDIS_URL': JSON.stringify(process.env.REDIS_URL)
+      'process.env.PRIMARY_REDIS_URL': JSON.stringify(process.env.PRIMARY_REDIS_URL || process.env.REDIS_URL),
+      'process.env.REPLICA_REDIS_URL': JSON.stringify(process.env.REPLICA_REDIS_URL)
     }
   }
 });
