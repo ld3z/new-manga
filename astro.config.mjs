@@ -12,7 +12,9 @@ export default defineConfig({
   vite: {
     define: {
       'process.env.PRIMARY_REDIS_URL': JSON.stringify(process.env.PRIMARY_REDIS_URL || process.env.REDIS_URL),
-      'process.env.REPLICA_REDIS_URL': JSON.stringify(process.env.REPLICA_REDIS_URL)
+      'process.env.REPLICA_REDIS_URL_1': JSON.stringify(process.env.REPLICA_REDIS_URL_1 || process.env.REPLICA_REDIS_URL),
+      'process.env.REPLICA_REDIS_URL_2': JSON.stringify(process.env.REPLICA_REDIS_URL_2),
+      'process.env.REPLICA_REDIS_URL_3': JSON.stringify(process.env.REPLICA_REDIS_URL_3)
     }
   }
 });
