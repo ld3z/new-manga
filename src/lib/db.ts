@@ -284,47 +284,78 @@ export async function checkCacheStatus(slugs: string[], lang: string): Promise<s
 }
 
 export async function getFeedMapping(feedId: string): Promise<FeedMapping | null> {
+  let foundMapping: string | null = null;
+  let sourceRedisName: string = "";
+  
   // First try primary
   try {
+    // Check primary database if available
     if (primaryClient?.status === 'ready') {
       try {
         await primaryClient.ping();
         const mapping = await primaryClient.get(feedId);
         if (mapping) {
           await primaryClient.expire(feedId, DEFAULT_CACHE_TTL);
-          const data = JSON.parse(mapping);
-          return {
-            slugs: data.slugs,
-            lang: data.lang
-          };
+          foundMapping = mapping;
+          sourceRedisName = "Primary";
         }
-        // If key not found in primary, we'll fall through to try replicas
       } catch (error) {
         console.warn('Primary Redis connection failed while retrieving mapping:', error);
         // Fall through to try replicas
       }
     }
 
-    // Try replicas one by one
-    for (const [url, client] of replicaClients.entries()) {
-      if (client.status === 'ready') {
-        try {
-          await client.ping();
-          console.log(`Trying to get key from ${getRedisName(url)}`);
-          const mapping = await client.get(feedId);
-          if (mapping) {
-            await client.expire(feedId, DEFAULT_CACHE_TTL);
-            const data = JSON.parse(mapping);
-            return {
-              slugs: data.slugs,
-              lang: data.lang
-            };
+    // If not found in primary, check replicas
+    if (!foundMapping) {
+      for (const [url, client] of replicaClients.entries()) {
+        if (client.status === 'ready') {
+          try {
+            await client.ping();
+            console.log(`Trying to get key from ${getRedisName(url)}`);
+            const mapping = await client.get(feedId);
+            if (mapping) {
+              await client.expire(feedId, DEFAULT_CACHE_TTL);
+              foundMapping = mapping;
+              sourceRedisName = getRedisName(url);
+              break; // Exit the loop once we find the mapping
+            }
+          } catch (error) {
+            console.warn(`${getRedisName(url)} connection failed while retrieving mapping:`, error);
+            // Continue to next replica
           }
-        } catch (error) {
-          console.warn(`${getRedisName(url)} connection failed while retrieving mapping:`, error);
-          // Continue to next replica
         }
       }
+    }
+
+    // If we found the mapping in any database, re-synchronize to all other databases
+    if (foundMapping) {
+      console.log(`Found mapping in ${sourceRedisName}. Re-synchronizing to all Redis instances...`);
+      
+      // Parse data for returning
+      const data = JSON.parse(foundMapping);
+      const result = {
+        slugs: data.slugs,
+        lang: data.lang
+      };
+      
+      // Fire-and-forget re-sync to all databases
+      (async () => {
+        try {
+          await writeToAllRedis(async (redis) => {
+            await redis.set(
+              feedId, 
+              foundMapping!, 
+              'EX',
+              DEFAULT_CACHE_TTL
+            );
+          });
+          console.log(`Successfully re-synchronized mapping for ${feedId} to all Redis instances`);
+        } catch (syncError) {
+          console.error('Error during Redis re-synchronization:', syncError);
+        }
+      })();
+      
+      return result;
     }
 
     // If we get here, the key wasn't found in any database
