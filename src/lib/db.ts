@@ -284,19 +284,51 @@ export async function checkCacheStatus(slugs: string[], lang: string): Promise<s
 }
 
 export async function getFeedMapping(feedId: string): Promise<FeedMapping | null> {
-  const redis = await getRedisClient();
-  
+  // First try primary
   try {
-    const mapping = await redis.get(feedId);
-    if (!mapping) return null;
-    
-    await redis.expire(feedId, DEFAULT_CACHE_TTL);
-    
-    const data = JSON.parse(mapping);
-    return {
-      slugs: data.slugs,
-      lang: data.lang
-    };
+    if (primaryClient?.status === 'ready') {
+      try {
+        await primaryClient.ping();
+        const mapping = await primaryClient.get(feedId);
+        if (mapping) {
+          await primaryClient.expire(feedId, DEFAULT_CACHE_TTL);
+          const data = JSON.parse(mapping);
+          return {
+            slugs: data.slugs,
+            lang: data.lang
+          };
+        }
+        // If key not found in primary, we'll fall through to try replicas
+      } catch (error) {
+        console.warn('Primary Redis connection failed while retrieving mapping:', error);
+        // Fall through to try replicas
+      }
+    }
+
+    // Try replicas one by one
+    for (const [url, client] of replicaClients.entries()) {
+      if (client.status === 'ready') {
+        try {
+          await client.ping();
+          console.log(`Trying to get key from ${getRedisName(url)}`);
+          const mapping = await client.get(feedId);
+          if (mapping) {
+            await client.expire(feedId, DEFAULT_CACHE_TTL);
+            const data = JSON.parse(mapping);
+            return {
+              slugs: data.slugs,
+              lang: data.lang
+            };
+          }
+        } catch (error) {
+          console.warn(`${getRedisName(url)} connection failed while retrieving mapping:`, error);
+          // Continue to next replica
+        }
+      }
+    }
+
+    // If we get here, the key wasn't found in any database
+    return null;
   } catch (error) {
     console.error('Error retrieving feed mapping:', error);
     throw new Error('Failed to retrieve feed mapping');
