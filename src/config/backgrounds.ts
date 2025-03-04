@@ -74,6 +74,43 @@ export const backgrounds: BackgroundImage[] = [
       },
     ],
   },
+  {
+    url: "/sleepy.webp",
+    title: "???",
+    artist: "soaphisoap",
+    source: "https://safebooru.org/index.php?page=post&s=view&id=5418793",
+    socials: [
+      {
+        name: "Twitter",
+        link: "https://x.com/soaphisoap",
+      },
+    ],
+  },
+  {
+    url: "/genshin.webp",
+    title: "???",
+    artist: "charlieinoni",
+    source: "https://safebooru.org/index.php?page=post&s=view&id=5531630",
+    socials: [
+      {
+        name: "Twitter",
+        link: "https://x.com/charlieinoni",
+      },
+    ],
+  },
+  {
+    url: "/meata.webp",
+    title: "???",
+    artist: "???",
+    source:
+      "https://i.pximg.net/img-original/img/2025/03/03/15/13/24/127822472_p0.png",
+    socials: [
+      {
+        name: "Twitter",
+        link: "https://x.com/",
+      },
+    ],
+  },
   // Add more backgrounds here!
   // {
   //   url: 'your-image-url',
