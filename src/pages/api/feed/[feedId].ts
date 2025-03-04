@@ -9,20 +9,43 @@ export const GET: APIRoute = async ({ params }) => {
   }
 
   try {
+    console.log(`Fetching feed mapping for ID: ${feedId}`);
     const mapping = await getFeedMapping(feedId);
     
     if (!mapping) {
-      return new Response("Feed not found", { status: 404 });
+      console.error(`Feed not found for ID: ${feedId}`);
+      return new Response(`Feed with ID "${feedId}" not found`, { status: 404 });
     }
 
-    return new Response(JSON.stringify(mapping), {
+    // Validate mapping structure before returning
+    if (!Array.isArray(mapping.slugs)) {
+      console.error(`Invalid slugs in feed mapping for ID: ${feedId}`, mapping);
+      return new Response(`Feed data corruption: invalid slugs format`, { 
+        status: 500 
+      });
+    }
+
+    // Ensure consistent response format
+    const response = {
+      slugs: mapping.slugs.filter(slug => typeof slug === 'string' && slug.trim()),
+      lang: typeof mapping.lang === 'string' ? mapping.lang : 'en'
+    };
+
+    console.log(`Successfully retrieved feed mapping for ID: ${feedId}`, response);
+    
+    return new Response(JSON.stringify(response), {
       status: 200,
       headers: {
         'Content-Type': 'application/json'
       }
     });
   } catch (error) {
-    console.error('Error fetching feed:', error);
-    return new Response("Internal server error", { status: 500 });
+    console.error(`Error fetching feed ${feedId}:`, error);
+    
+    const errorMessage = error instanceof Error 
+      ? `Internal server error: ${error.message}` 
+      : "Internal server error";
+      
+    return new Response(errorMessage, { status: 500 });
   }
 };

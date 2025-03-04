@@ -476,17 +476,51 @@ const languages = [
       `;
 
       const response = await fetch(`/api/feed/${feedId}`);
-      if (!response.ok) throw new Error('Failed to fetch feed');
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`Feed import failed with status ${response.status}: ${errorText}`);
+        throw new Error(`Failed to fetch feed: ${response.status} ${response.statusText}`);
+      }
       
-      const { slugs: feedSlugs, lang } = await response.json();
+      const data = await response.json();
+      console.log('Feed import data:', data); // Diagnostic log
+
+      // Validate response structure
+      if (!data || typeof data !== 'object') {
+        throw new Error('Invalid feed data format: not an object');
+      }
       
-      // Update language if provided
-      if (lang && langSelect) {
-        langSelect.value = lang;
+      const feedSlugs = data.slugs;
+      const lang = data.lang;
+      
+      // Validate slugs array
+      if (!feedSlugs || !Array.isArray(feedSlugs)) {
+        throw new Error('Invalid feed data: missing or invalid slugs array');
+      }
+
+      // Validate language
+      if (!lang || typeof lang !== 'string') {
+        console.warn('Feed has missing or invalid language, using default');
+      } else if (langSelect) {
+        // Only update language if it's valid
+        const validLanguages = Array.from(langSelect.options).map(opt => opt.value);
+        if (validLanguages.includes(lang)) {
+          langSelect.value = lang;
+        } else {
+          console.warn(`Feed has unsupported language: ${lang}`);
+        }
       }
 
       // Add new slugs to existing collection
-      feedSlugs.forEach((slug: string) => slugs.add(slug));
+      let importCount = 0;
+      feedSlugs.forEach((slug: string) => {
+        if (typeof slug === 'string' && slug.trim()) {
+          slugs.add(slug.trim());
+          importCount++;
+        } else {
+          console.warn('Skipping invalid slug in feed:', slug);
+        }
+      });
       
       // Update UI
       updateSlugs();
@@ -495,7 +529,7 @@ const languages = [
       // Show success message
       const successDiv = document.createElement('div');
       successDiv.className = 'text-sm text-green-500 mt-1';
-      successDiv.textContent = 'Feed imported successfully!';
+      successDiv.textContent = `Feed imported successfully! Added ${importCount} comics.`;
       feedIdInput.parentNode?.appendChild(successDiv);
       setTimeout(() => successDiv.remove(), 3000);
 
@@ -503,9 +537,11 @@ const languages = [
       console.error('Failed to import feed:', error);
       const errorDiv = document.createElement('div');
       errorDiv.className = 'text-sm text-red-500 mt-1';
-      errorDiv.textContent = 'Failed to import feed. Please check the feed ID and try again.';
+      errorDiv.textContent = error instanceof Error 
+        ? `Import failed: ${error.message}` 
+        : 'Failed to import feed. Please check the feed ID and try again.';
       feedIdInput.parentNode?.appendChild(errorDiv);
-      setTimeout(() => errorDiv.remove(), 3000);
+      setTimeout(() => errorDiv.remove(), 5000);
     } finally {
       importFeedButton.disabled = false;
       importFeedButton.innerHTML = `
