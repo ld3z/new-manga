@@ -479,7 +479,23 @@ const languages = [
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`Feed import failed with status ${response.status}: ${errorText}`);
-        throw new Error(`Failed to fetch feed: ${response.status} ${response.statusText}`);
+        
+        // Display a more user-friendly error based on the status code
+        let userFriendlyError = 'Failed to import feed.';
+        
+        if (response.status === 404) {
+          userFriendlyError = `Feed ID "${feedId}" not found. Please check the ID and try again.`;
+        } else if (response.status === 500) {
+          if (errorText.includes('ETIMEDOUT') || errorText.includes('timeout')) {
+            userFriendlyError = 'Connection to database timed out. This is common on the first request. Please try again in a few seconds.';
+          } else if (errorText.includes('ECONNREFUSED')) {
+            userFriendlyError = 'Database connection refused. Please try again later.';
+          } else {
+            userFriendlyError = 'Server error while importing feed. Please try again later.';
+          }
+        }
+        
+        throw new Error(userFriendlyError);
       }
       
       const data = await response.json();

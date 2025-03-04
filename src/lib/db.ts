@@ -2,6 +2,11 @@ import Redis from 'ioredis';
 import type { FeedMapping } from './types';
 import { getChaptersForSlugs } from './api';
 
+// Extended Error interface for network errors
+interface RedisNetworkError extends Error {
+  code?: string;
+}
+
 // Primary Redis configuration
 const PRIMARY_REDIS_URL = import.meta.env.PRIMARY_REDIS_URL || process.env.PRIMARY_REDIS_URL || process.env.REDIS_URL;
 
@@ -39,6 +44,9 @@ let replicaClients: Map<string, Redis> = new Map();
 const DEFAULT_CACHE_TTL = 60 * 60 * 24 * 30; // 30 days
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 100;
+const IS_VERCEL = process.env.VERCEL || false;
+const VERCEL_CONNECTION_TIMEOUT = 15000; // 15 seconds for Vercel
+const LOCAL_CONNECTION_TIMEOUT = 5000;   // 5 seconds for local
 
 // Improved connection handling with exponential backoff
 async function createRedisClient(url: string): Promise<Redis> {
@@ -57,8 +65,14 @@ async function createRedisClient(url: string): Promise<Redis> {
     maxRetriesPerRequest: null,  // Allow retries for queued commands
     enableOfflineQueue: true,     // Enable command queuing
     enableReadyCheck: true,
+    connectTimeout: 15000,     // Increase connection timeout to 15 seconds for Vercel's serverless environment
+    disconnectTimeout: 10000,   // Increase disconnect timeout to 10 seconds
+    keepAlive: 10000,          // Send keepalive every 10 seconds
+    commandTimeout: 10000,      // Command timeout
+    retryMaxDelay: 5000,        // Maximum delay between retries
     reconnectOnError: (err) => {
-      return err.message.includes('READONLY');
+      const targetErrors = ['READONLY', 'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND'];
+      return targetErrors.some(e => err.message.includes(e));
     }
   };
 
@@ -67,10 +81,21 @@ async function createRedisClient(url: string): Promise<Redis> {
 
 // Get the best available Redis client
 export async function getRedisClient(): Promise<Redis> {
+  // Special handling for Vercel environment
+  if (IS_VERCEL) {
+    console.log('Running in Vercel environment - using optimized Redis connection strategy');
+  }
+
   // Try primary first
   if (primaryClient?.status === 'ready') {
     try {
-      await primaryClient.ping();
+      // Add timeout to ping
+      const pingPromise = primaryClient.ping();
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Ping timeout')), 3000)
+      );
+      
+      await Promise.race([pingPromise, timeoutPromise]);
       return primaryClient;
     } catch (error) {
       console.warn('Primary Redis connection failed, will try replicas:', error);
@@ -82,7 +107,13 @@ export async function getRedisClient(): Promise<Redis> {
   for (const [url, client] of replicaClients.entries()) {
     if (client.status === 'ready') {
       try {
-        await client.ping();
+        // Add timeout to ping
+        const pingPromise = client.ping();
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Ping timeout')), 3000)
+        );
+        
+        await Promise.race([pingPromise, timeoutPromise]);
         console.log(`Using ${getRedisName(url)}`);
         return client;
       } catch (error) {
@@ -99,13 +130,60 @@ export async function getRedisClient(): Promise<Redis> {
     
     primaryClient
       .on('ready', () => console.log('Primary Redis connection ready'))
-      .on('error', (err) => console.error('Primary Redis error:', err))
+      .on('error', (err: RedisNetworkError) => {
+        // Log more details for connection errors
+        if (err.code === 'ETIMEDOUT') {
+          console.error('Primary Redis connection timeout. This is common in serverless environments like Vercel. Check your network connectivity and Redis server availability.');
+        } else if (err.code === 'ECONNREFUSED') {
+          console.error('Primary Redis connection refused. Ensure the Redis server is running and the URL is correct.');
+        } else if (err.code === 'ENOTFOUND') {
+          console.error('Primary Redis host not found. Check your PRIMARY_REDIS_URL environment variable.');
+        } else {
+          console.error('Primary Redis error:', err);
+        }
+      })
       .on('reconnecting', () => console.log('Primary Redis reconnecting'))
       .on('end', () => console.log('Primary Redis connection closed'));
     
     return primaryClient;
   } catch (error) {
     console.error('Failed to connect to primary Redis:', error);
+    
+    // Special handling for Vercel ETIMEDOUT errors
+    if (IS_VERCEL && error instanceof Error && error.message.includes('ETIMEDOUT')) {
+      console.log('Encountered ETIMEDOUT in Vercel environment. Retrying with longer timeout...');
+      try {
+        // Try one more time with increased timeout
+        const tempClient = new Redis(PRIMARY_REDIS_URL!, {
+          connectTimeout: 20000,  // Increased timeout for last-ditch effort
+          retryStrategy: () => null // No retries for this attempt
+        });
+        
+        // Wait for ready or error
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            tempClient.disconnect();
+            reject(new Error('Final connection attempt timed out'));
+          }, 20000);
+          
+          tempClient.once('ready', () => {
+            clearTimeout(timeout);
+            resolve(true);
+          });
+          
+          tempClient.once('error', (err) => {
+            clearTimeout(timeout);
+            reject(err);
+          });
+        });
+        
+        // If we get here, connection was successful
+        primaryClient = tempClient;
+        return tempClient;
+      } catch (finalError) {
+        console.error('Final Redis connection attempt failed:', finalError);
+      }
+    }
     
     // Try connecting to any replica that might be available
     for (const url of REPLICA_URLS) {
@@ -116,7 +194,18 @@ export async function getRedisClient(): Promise<Redis> {
         
         client
           .on('ready', () => console.log(`${redisName} connection ready`))
-          .on('error', (err) => console.error(`${redisName} error:`, err))
+          .on('error', (err: RedisNetworkError) => {
+            // Log more details for connection errors
+            if (err.code === 'ETIMEDOUT') {
+              console.error(`${redisName} connection timeout. This is common in serverless environments like Vercel. Check your network connectivity and Redis server availability.`);
+            } else if (err.code === 'ECONNREFUSED') {
+              console.error(`${redisName} connection refused. Ensure the Redis server is running and the URL is correct.`);
+            } else if (err.code === 'ENOTFOUND') {
+              console.error(`${redisName} host not found. Check your Redis URL environment variables.`);
+            } else {
+              console.error(`${redisName} error:`, err);
+            }
+          })
           .on('reconnecting', () => console.log(`${redisName} reconnecting`))
           .on('end', () => console.log(`${redisName} connection closed`));
         
