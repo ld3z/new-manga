@@ -7,7 +7,6 @@ export default defineConfig({
   adapter: vercel({
     analytics: true,
     maxDuration: 60,
-    includeFiles: ['.env'],
   }),
   image: {
     remotePatterns: [{ protocol: "https" }],

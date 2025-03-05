@@ -7,8 +7,15 @@ interface RedisNetworkError extends Error {
   code?: string;
 }
 
-// Primary Redis configuration
+// Primary Redis configuration - with more robust fallbacks and logging
 const PRIMARY_REDIS_URL = import.meta.env.PRIMARY_REDIS_URL || process.env.PRIMARY_REDIS_URL || process.env.REDIS_URL;
+
+// Log Redis URL status (without exposing sensitive data)
+console.log(`Redis URLs status: Primary=${Boolean(PRIMARY_REDIS_URL)}`);
+
+if (!PRIMARY_REDIS_URL) {
+  console.warn('WARNING: No Redis URL configured. Database functionality will not work properly.');
+}
 
 // Multiple replicas support
 const REPLICA_URLS = [
@@ -16,6 +23,8 @@ const REPLICA_URLS = [
   import.meta.env.REPLICA_REDIS_URL_2 || process.env.REPLICA_REDIS_URL_2,
   import.meta.env.REPLICA_REDIS_URL_3 || process.env.REPLICA_REDIS_URL_3,
 ].filter(Boolean) as string[];
+
+console.log(`Found ${REPLICA_URLS.length} Redis replica URLs`);
 
 // Create a mapping of URLs to friendly names for logging
 const redisInstanceNames = new Map<string, string>();
@@ -94,11 +103,19 @@ export async function getRedisClient(): Promise<Redis> {
     console.log('Running in Vercel environment - using optimized Redis connection strategy');
   }
 
+  // Check if Redis is configured
+  if (!PRIMARY_REDIS_URL && REPLICA_URLS.length === 0) {
+    throw new Error('No Redis URLs configured. Please check your environment variables in the Vercel dashboard.');
+  }
+
   try {
     // Try primary first
     if (!primaryClient) {
       console.log('Creating new primary Redis client');
-      primaryClient = await createRedisClient(PRIMARY_REDIS_URL!);
+      if (!PRIMARY_REDIS_URL) {
+        throw new Error('Primary Redis URL is not set. Please check your environment variables.');
+      }
+      primaryClient = await createRedisClient(PRIMARY_REDIS_URL);
     } else if (primaryClient.status !== 'ready') {
       console.log('Primary Redis client not ready, reconnecting');
       try {
@@ -106,7 +123,7 @@ export async function getRedisClient(): Promise<Redis> {
       } catch (e) {
         console.error('Error disconnecting primary client:', e);
       }
-      primaryClient = await createRedisClient(PRIMARY_REDIS_URL!);
+      primaryClient = await createRedisClient(PRIMARY_REDIS_URL);
     }
 
     try {
@@ -126,74 +143,20 @@ export async function getRedisClient(): Promise<Redis> {
     console.error('Error connecting to primary Redis:', primaryError);
     
     // Special handling for Vercel ETIMEDOUT errors
-    if (IS_VERCEL && primaryError instanceof Error && primaryError.message.includes('ETIMEDOUT')) {
-      console.log('Encountered ETIMEDOUT in Vercel environment. Retrying with longer timeout...');
-      try {
-        // Try one more time with increased timeout
-        const tempClient = new Redis(PRIMARY_REDIS_URL!, {
-          connectTimeout: 20000,  // Increased timeout for last-ditch effort
-          retryStrategy: () => null // No retries for this attempt
-        });
-        
-        // Wait for ready or error
-        await new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            tempClient.disconnect();
-            reject(new Error('Final connection attempt timed out'));
-          }, 20000);
-          
-          tempClient.once('ready', () => {
-            clearTimeout(timeout);
-            resolve(true);
-          });
-          
-          tempClient.once('error', (err) => {
-            clearTimeout(timeout);
-            reject(err);
-          });
-        });
-        
-        // If we get here, connection was successful
-        primaryClient = tempClient;
-        return tempClient;
-      } catch (finalError) {
-        console.error('Final Redis connection attempt failed:', finalError);
+    if (IS_VERCEL && primaryError instanceof Error) {
+      const errorMsg = primaryError.message;
+      
+      if (errorMsg.includes('ETIMEDOUT')) {
+        console.log('Encountered ETIMEDOUT in Vercel environment. This is a common issue with Vercel serverless functions and Redis.');
+        throw new Error('Redis connection timed out. Please ensure your Redis service allows connections from Vercel IP ranges. See Vercel documentation for IP ranges used by their serverless functions.');
+      } else if (errorMsg.includes('ECONNREFUSED')) {
+        throw new Error('Redis connection refused. Please check if your Redis service is running and accessible from Vercel.');
+      } else if (errorMsg.includes('ENOTFOUND')) {
+        throw new Error('Redis host not found. Please check your PRIMARY_REDIS_URL environment variable.');
       }
     }
     
-    // Try connecting to any replica that might be available
-    for (const url of REPLICA_URLS) {
-      try {
-        const redisName = getRedisName(url);
-        console.log(`Trying to connect to ${redisName}...`);
-        const client = await createRedisClient(url);
-        
-        client
-          .on('ready', () => console.log(`${redisName} connection ready`))
-          .on('error', (err: RedisNetworkError) => {
-            // Log more details for connection errors
-            if (err.code === 'ETIMEDOUT') {
-              console.error(`${redisName} connection timeout. This is common in serverless environments like Vercel. Check your network connectivity and Redis server availability.`);
-            } else if (err.code === 'ECONNREFUSED') {
-              console.error(`${redisName} connection refused. Ensure the Redis server is running and the URL is correct.`);
-            } else if (err.code === 'ENOTFOUND') {
-              console.error(`${redisName} host not found. Check your Redis URL environment variables.`);
-            } else {
-              console.error(`${redisName} error:`, err);
-            }
-          })
-          .on('reconnecting', () => console.log(`${redisName} reconnecting`))
-          .on('end', () => console.log(`${redisName} connection closed`));
-        
-        replicaClients.set(url, client);
-        return client;
-      } catch (replicaError) {
-        console.error(`Failed to connect to ${getRedisName(url)}:`, replicaError);
-        // Continue to next replica
-      }
-    }
-    
-    throw new Error('All Redis connections failed');
+    throw primaryError;
   }
 }
 
@@ -314,24 +277,57 @@ export async function warmChapterCache(slugs: string[], lang: string): Promise<v
 }
 
 export async function storeFeedMapping(feedId: string, slugs: string[], lang: string): Promise<void> {
+  if (!feedId) throw new Error('Feed ID is required');
+  if (!Array.isArray(slugs) || slugs.length === 0) throw new Error('Slugs array is required and cannot be empty');
+  if (!lang) throw new Error('Language is required');
+
   const mapping = {
     slugs,
     lang,
     created_at: new Date().toISOString()
   };
   
+  console.log(`Attempting to store feed mapping with ID: ${feedId}, language: ${lang}, and ${slugs.length} slugs`);
+  
+  // Check if Redis is configured
+  if (!PRIMARY_REDIS_URL && REPLICA_URLS.length === 0) {
+    console.error('No Redis URLs configured. Cannot store feed mapping.');
+    throw new Error('Database connection not configured. Please check your environment variables.');
+  }
+  
   try {
     await writeToAllRedis(async (redis) => {
-      await redis.set(
-        feedId, 
-        JSON.stringify(mapping),
-        'EX',
-        DEFAULT_CACHE_TTL
-      );
+      console.log(`Writing feed mapping to Redis instance...`);
+      
+      try {
+        await redis.set(
+          feedId, 
+          JSON.stringify(mapping),
+          'EX',
+          DEFAULT_CACHE_TTL
+        );
+        console.log(`Successfully stored feed mapping in Redis instance`);
+      } catch (redisError: any) {
+        console.error(`Redis set operation failed:`, redisError);
+        throw new Error(`Redis operation failed: ${redisError.message || 'Unknown Redis error'}`);
+      }
     });
-  } catch (error) {
+    
+    console.log(`Feed mapping successfully stored with ID: ${feedId}`);
+  } catch (error: any) {
     console.error('Error storing feed mapping:', error);
-    throw new Error('Failed to store feed mapping');
+    
+    // Check for common connection issues
+    const errorMsg = error.message || '';
+    if (errorMsg.includes('ECONNREFUSED')) {
+      throw new Error('Unable to connect to the Redis database. Connection refused.');
+    } else if (errorMsg.includes('ETIMEDOUT')) {
+      throw new Error('Connection to Redis database timed out. This may be due to network issues or firewall settings.');
+    } else if (errorMsg.includes('ENOTFOUND')) {
+      throw new Error('Redis host not found. Please check your database URL configuration.');
+    } else {
+      throw new Error(`Failed to store feed mapping: ${errorMsg}`);
+    }
   }
 }
 
