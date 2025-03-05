@@ -4,7 +4,11 @@ import tailwind from "@astrojs/tailwind";
 
 export default defineConfig({
   output: "server",
-  adapter: vercel(),
+  adapter: vercel({
+    analytics: true,
+    maxDuration: 60,
+    includeFiles: ['.env'],
+  }),
   image: {
     remotePatterns: [{ protocol: "https" }],
   },
@@ -14,7 +18,13 @@ export default defineConfig({
       'process.env.PRIMARY_REDIS_URL': JSON.stringify(process.env.PRIMARY_REDIS_URL || process.env.REDIS_URL),
       'process.env.REPLICA_REDIS_URL_1': JSON.stringify(process.env.REPLICA_REDIS_URL_1 || process.env.REPLICA_REDIS_URL),
       'process.env.REPLICA_REDIS_URL_2': JSON.stringify(process.env.REPLICA_REDIS_URL_2),
-      'process.env.REPLICA_REDIS_URL_3': JSON.stringify(process.env.REPLICA_REDIS_URL_3)
-    }
+      'process.env.REPLICA_REDIS_URL_3': JSON.stringify(process.env.REPLICA_REDIS_URL_3),
+      'process.env.VERCEL': JSON.stringify(process.env.VERCEL || false)
+    },
+    server: {
+      watch: {
+        usePolling: true,
+      },
+    },
   }
 });
