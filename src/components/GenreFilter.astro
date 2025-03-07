@@ -1,0 +1,157 @@
+---
+import { fetchGenres } from '../lib/api';
+
+const genres = await fetchGenres();
+---
+
+<div class="relative inline-block">
+  <button
+    id="genre-filter-btn"
+    class="bg-secondary text-primary px-4 py-2 rounded-lg hover:bg-hover transition-colors flex items-center gap-2"
+    aria-expanded="false"
+  >
+    <svg 
+      xmlns="http://www.w3.org/2000/svg" 
+      class="w-5 h-5" 
+      viewBox="0 0 24 24" 
+      fill="none" 
+      stroke="currentColor" 
+      stroke-width="2"
+    >
+      <path d="M3 6h18M6 12h12m-9 6h6"/>
+    </svg>
+    <span>Filter Genres</span>
+    <span id="excluded-count" class="bg-accent/20 text-accent px-2 rounded-full text-sm hidden">
+      0
+    </span>
+  </button>
+
+  <div
+    id="genre-dropdown"
+    class="absolute z-50 mt-2 w-64 bg-secondary rounded-lg shadow-lg border border-hover/30 hidden"
+  >
+    <div class="p-3">
+      <div class="flex justify-between items-center mb-2">
+        <h3 class="font-medium">Exclude Genres</h3>
+        <button
+          id="clear-filters"
+          class="text-sm text-accent hover:text-accent-light transition-colors"
+        >
+          Clear All
+        </button>
+      </div>
+      <input
+        type="text"
+        placeholder="Search genres..."
+        class="w-full px-3 py-2 bg-primary rounded border border-hover/30 text-sm mb-2"
+        id="genre-search"
+      />
+      <div class="max-h-64 overflow-y-auto space-y-1" id="genre-list">
+        {genres.map(genre => (
+          <label class="flex items-center gap-2 px-2 py-1.5 hover:bg-hover/50 rounded cursor-pointer">
+            <input
+              type="checkbox"
+              value={genre.id}
+              class="genre-checkbox w-4 h-4 rounded border border-hover/30 bg-primary checked:bg-accent transition-all duration-200 ease-in-out"
+            />
+            <span class="text-sm">{genre.name}</span>
+          </label>
+        ))}
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const button = document.getElementById('genre-filter-btn');
+  const dropdown = document.getElementById('genre-dropdown');
+  const genreList = document.getElementById('genre-list');
+  const clearButton = document.getElementById('clear-filters');
+  const searchInput = document.getElementById('genre-search') as HTMLInputElement;
+  const excludedCount = document.getElementById('excluded-count');
+  
+  // Load excluded genres from localStorage
+  let excludedGenres = new Set(JSON.parse(localStorage.getItem('excluded-genres') || '[]'));
+  
+  // Initialize checkboxes
+  function initCheckboxes() {
+    document.querySelectorAll('.genre-checkbox').forEach((checkbox: HTMLInputElement) => {
+      checkbox.checked = excludedGenres.has(Number(checkbox.value));
+    });
+    updateExcludedCount();
+  }
+
+  function updateExcludedCount() {
+    if (excludedCount) {
+      if (excludedGenres.size > 0) {
+        excludedCount.textContent = excludedGenres.size.toString();
+        excludedCount.classList.remove('hidden');
+      } else {
+        excludedCount.classList.add('hidden');
+      }
+    }
+  }
+
+  // Handle checkbox changes
+  function handleCheckboxChange(e: Event) {
+    const checkbox = e.target as HTMLInputElement;
+    const genreId = Number(checkbox.value);
+    
+    if (checkbox.checked) {
+      excludedGenres.add(genreId);
+    } else {
+      excludedGenres.delete(genreId);
+    }
+    
+    localStorage.setItem('excluded-genres', JSON.stringify([...excludedGenres]));
+    updateExcludedCount();
+    
+    // Dispatch event for comic filtering
+    window.dispatchEvent(new CustomEvent('genresUpdated', {
+      detail: { excludedGenres: [...excludedGenres] }
+    }));
+  }
+
+  // Search functionality
+  function handleSearch() {
+    const query = searchInput.value.toLowerCase();
+    const labels = genreList?.querySelectorAll('label');
+    
+    labels?.forEach(label => {
+      const text = label.textContent?.toLowerCase() || '';
+      label.style.display = text.includes(query) ? '' : 'none';
+    });
+  }
+
+  // Event listeners
+  button?.addEventListener('click', () => {
+    dropdown?.classList.toggle('hidden');
+    button.setAttribute('aria-expanded', dropdown?.classList.contains('hidden') ? 'false' : 'true');
+  });
+
+  clearButton?.addEventListener('click', () => {
+    excludedGenres.clear();
+    localStorage.setItem('excluded-genres', '[]');
+    initCheckboxes();
+    window.dispatchEvent(new CustomEvent('genresUpdated', {
+      detail: { excludedGenres: [] }
+    }));
+  });
+
+  document.querySelectorAll('.genre-checkbox').forEach(checkbox => {
+    checkbox.addEventListener('change', handleCheckboxChange);
+  });
+
+  searchInput?.addEventListener('input', handleSearch);
+
+  // Close dropdown when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!button?.contains(e.target as Node) && !dropdown?.contains(e.target as Node)) {
+      dropdown?.classList.add('hidden');
+      button?.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  // Initialize
+  initCheckboxes();
+</script> 

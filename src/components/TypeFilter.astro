@@ -1,0 +1,31 @@
+---
+interface Props {
+  currentType: string;
+  lang: string;
+  contentType: string;
+}
+
+const { currentType, lang, contentType } = Astro.props;
+
+const types = [
+  { id: 'all', label: 'All' },
+  { id: 'manga', label: 'Manga' },
+  { id: 'manhwa', label: 'Manhwa' },
+  { id: 'manhua', label: 'Manhua' },
+];
+---
+
+<div class="flex gap-2 mb-6">
+  {types.map(type => (
+    <a
+      href={`/${lang}/${contentType}/${type.id}`}
+      class={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+        currentType === type.id
+          ? 'bg-[rgb(var(--accent-bg))] text-[rgb(var(--accent-text))]'
+          : 'bg-secondary text-primary hover:bg-hover'
+      }`}
+    >
+      {type.label}
+    </a>
+  ))}
+</div> 

@@ -1,0 +1,119 @@
+---
+import Layout from '../../../layouts/Layout.astro';
+import ComicCard from '../../../components/ComicCard.astro';
+import LoadingCard from '../../../components/LoadingCard.astro';
+import RSSLink from '../../../components/RSSLink.astro';
+import TypeFilter from '../../../components/TypeFilter.astro';
+import LanguageSelector from '../../../components/LanguageSelector.astro';
+import GenreFilter from '../../../components/GenreFilter.astro';
+import { fetchComics, fetchGenres, isValidLanguage, isValidContentType, isValidComicType, getLanguageName } from '../../../lib/api';
+import type { Comic, Genre } from '../../../lib/types';
+
+export const prerender = false;
+
+const { lang, contentType, type } = Astro.params;
+
+if (!isValidLanguage(lang!) || !isValidContentType(contentType!) || !isValidComicType(type!)) {
+  return Astro.redirect('/en/sfw/all');
+}
+
+let comics: Comic[] = [];
+let genres: Genre[] = [];
+let error: string | null = null;
+
+try {
+  [comics, genres] = await Promise.all([
+    fetchComics(lang, contentType, type as any),
+    fetchGenres(),
+  ]);
+} catch (e) {
+  error = e instanceof Error ? e.message : 'Failed to fetch comics';
+}
+
+const title = `ComicK - ${getLanguageName(lang!)} ${contentType?.toUpperCase()} ${type?.toUpperCase()}`;
+---
+
+<Layout title={title}>
+  <main class="container mx-auto px-4 py-8">
+    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
+      <h1 class="text-3xl font-bold text-primary">Latest Updates</h1>
+      <div class="flex flex-col sm:flex-row gap-4">
+        <div class="flex items-center gap-4">
+          <LanguageSelector currentLang={lang!} currentType={type!} contentType={contentType!} />
+          <GenreFilter />
+          <div class="flex gap-2">
+            <a
+              href={`/${lang}/sfw/${type}`}
+              class={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                contentType === 'sfw'
+                  ? 'bg-[rgb(var(--accent-bg))] text-[rgb(var(--accent-text))]'
+                  : 'bg-secondary text-primary hover:bg-hover'
+              }`}
+            >
+              SFW
+            </a>
+            <a
+              href={`/${lang}/nsfw/${type}`}
+              class={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                contentType === 'nsfw'
+                  ? 'bg-[rgb(var(--accent-bg))] text-[rgb(var(--accent-text))]'
+                  : 'bg-secondary text-primary hover:bg-hover'
+              }`}
+            >
+              NSFW
+            </a>
+          </div>
+        </div>
+        <a
+          href="/custom"
+          class="inline-flex items-center gap-2 px-4 py-2 bg-secondary rounded-lg hover:bg-hover transition-colors"
+        >
+          <svg
+            class="w-5 h-5"
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+          Custom Feed/Filter
+        </a>
+        <RSSLink lang={lang!} contentType={contentType!} type={type!} />
+      </div>
+    </div>
+
+    <TypeFilter currentType={type!} lang={lang!} contentType={contentType!} />
+    
+    {error && (
+      <div class="bg-red-500 text-white p-4 rounded-lg mb-8">
+        <p>Error: {error}</p>
+        <button 
+          class="mt-2 px-4 py-2 bg-white text-red-500 rounded hover:bg-red-50 transition-colors"
+          onclick="window.location.reload()"
+        >
+          Retry
+        </button>
+      </div>
+    )}
+    
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-6">
+      {comics.length > 0 ? (
+        comics.map(comic => (
+          <ComicCard comic={comic} genres={genres} />
+        ))
+      ) : !error ? (
+        Array(10).fill(null).map(() => (
+          <LoadingCard />
+        ))
+      ) : (
+        <div class="col-span-full text-center bg-secondary p-6 rounded-lg">
+          <p class="text-primary/60">No comics found</p>
+        </div>
+      )}
+    </div>
+  </main>
+</Layout> 
