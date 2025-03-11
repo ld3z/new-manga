@@ -7,6 +7,8 @@ export const CHAPTER_CACHE_TTL = 60 * 60; // 1 hour
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 50;
 const IS_VERCEL = process.env.VERCEL || false;
+const HEALTH_CHECK_INTERVAL = 60 * 1000; // Check primary health every minute
+const REPLICA_PROMOTION_THRESHOLD = 5; // After 5 failed primary health checks, promote a replica to primary
 
 // Redis URLs from environment variables
 const PRIMARY_REDIS_URL =
@@ -22,9 +24,12 @@ const REPLICA_URLS = [
   import.meta.env.REPLICA_REDIS_URL_3 || process.env.REPLICA_REDIS_URL_3,
 ].filter(Boolean) as string[];
 
-// Singleton clients
+// Singleton clients with health status tracking
 let primaryClient: Redis | null = null;
+let primaryHealthy: boolean = true;
+let primaryFailedChecks = 0;
 let replicaClients: Map<string, Redis> = new Map();
+let activeReplicaUrl: string | null = null;
 
 // Redis instance naming for logging
 const redisInstanceNames = new Map<string, string>();
@@ -83,9 +88,19 @@ async function createRedisClient(url: string): Promise<Redis> {
   // Setup event listeners
   client
     .on("ready", () => console.log(`${redisName} ready`))
-    .on("error", (err) => console.error(`${redisName} error:`, err))
+    .on("error", (err) => {
+      console.error(`${redisName} error:`, err);
+      if (url === PRIMARY_REDIS_URL) {
+        primaryHealthy = false;
+      }
+    })
     .on("reconnecting", () => console.log(`${redisName} reconnecting`))
-    .on("end", () => console.log(`${redisName} closed`));
+    .on("end", () => {
+      console.log(`${redisName} closed`);
+      if (url === PRIMARY_REDIS_URL) {
+        primaryHealthy = false;
+      }
+    });
 
   return client;
 }
@@ -110,69 +125,105 @@ async function checkConnection(client: Redis, name: string): Promise<boolean> {
 
 /**
  * Get an active Redis client from the pool
+ * Prioritizes primary, falls back to replicas
  */
 export async function getRedisClient(): Promise<Redis> {
-  // Try primary client
-  if (!primaryClient || primaryClient.status !== "ready") {
-    primaryClient = await createRedisClient(PRIMARY_REDIS_URL!);
-  }
-  
-  if (await checkConnection(primaryClient, "Primary")) {
+  // Try primary client first if it's considered healthy
+  if (primaryHealthy && (primaryClient === null || primaryClient.status !== "ready")) {
+    try {
+      primaryClient = await createRedisClient(PRIMARY_REDIS_URL!);
+      const isPrimaryConnected = await checkConnection(primaryClient, "Primary");
+      primaryHealthy = isPrimaryConnected;
+      if (isPrimaryConnected) {
+        primaryFailedChecks = 0;
+        console.log("Initialized primary Redis connection");
+        return primaryClient;
+      }
+    } catch (err) {
+      console.error("Failed to initialize primary Redis:", err);
+      primaryHealthy = false;
+      primaryFailedChecks++;
+    }
+  } else if (primaryHealthy && primaryClient && primaryClient.status === "ready") {
     return primaryClient;
   }
 
-  // Try replicas
-  for (const url of REPLICA_URLS) {
-    let client = replicaClients.get(url);
-    if (!client || client.status !== "ready") {
-      client = await createRedisClient(url);
-      replicaClients.set(url, client);
-    }
-    
-    if (await checkConnection(client, getRedisName(url))) {
-      return client;
+  // Primary is unhealthy, try to use the active replica if we have one
+  if (activeReplicaUrl && replicaClients.has(activeReplicaUrl)) {
+    const activeReplica = replicaClients.get(activeReplicaUrl)!;
+    if (activeReplica.status === "ready" && await checkConnection(activeReplica, getRedisName(activeReplicaUrl))) {
+      console.log(`Using active replica: ${getRedisName(activeReplicaUrl)}`);
+      return activeReplica;
     }
   }
 
-  // Fallback: Force new primary connection
+  // No active replica, try replicas in order
+  for (const url of REPLICA_URLS) {
+    try {
+      let client = replicaClients.get(url);
+      if (!client || client.status !== "ready") {
+        client = await createRedisClient(url);
+        replicaClients.set(url, client);
+      }
+      
+      if (await checkConnection(client, getRedisName(url))) {
+        console.log(`Switching to replica: ${getRedisName(url)}`);
+        activeReplicaUrl = url;
+        
+        // If primary has been down for a while, promote this replica to be the new primary
+        if (primaryFailedChecks >= REPLICA_PROMOTION_THRESHOLD) {
+          console.log(`Promoting ${getRedisName(url)} to primary after ${primaryFailedChecks} failed checks`);
+          primaryClient = client;
+          primaryHealthy = true;
+          primaryFailedChecks = 0;
+        }
+        
+        return client;
+      }
+    } catch (err) {
+      console.error(`Failed to connect to replica ${getRedisName(url)}:`, err);
+    }
+  }
+
+  // If all else fails, try one more time with primary
+  console.warn("All Redis connections failed, making last attempt with primary");
   primaryClient = await createRedisClient(PRIMARY_REDIS_URL!);
   return primaryClient;
 }
 
 /**
- * Write data to all available Redis instances
+ * Schedule periodic health checks to detect when primary recovers
  */
-async function writeToAllRedis(
-  operation: (redis: Redis) => Promise<any>
-): Promise<void> {
-  const clients = [
-    primaryClient,
-    ...Array.from(replicaClients.values()),
-  ].filter(Boolean) as Redis[];
-  
-  const errors: Error[] = [];
+function scheduleHealthChecks() {
+  if (typeof setInterval === 'undefined') return; // Skip in environments without setInterval
 
-  for (const client of clients) {
-    try {
-      if (client.status === "ready") {
-        await operation(client);
+  setInterval(async () => {
+    if (!primaryHealthy && primaryClient) {
+      try {
+        const isPrimaryHealthy = await checkConnection(primaryClient, "Primary");
+        if (isPrimaryHealthy) {
+          console.log("Primary Redis recovered");
+          primaryHealthy = true;
+          primaryFailedChecks = 0;
+        } else {
+          primaryFailedChecks++;
+          console.log(`Primary still unhealthy, failed checks: ${primaryFailedChecks}`);
+        }
+      } catch (err) {
+        primaryFailedChecks++;
+        console.error("Health check for primary Redis failed:", err);
       }
-    } catch (err) {
-      errors.push(err as Error);
-      console.error(
-        `Write failed for ${getRedisName(client.options.host || "")}:`,
-        err
-      );
     }
-  }
+  }, HEALTH_CHECK_INTERVAL);
+}
 
-  if (errors.length === clients.length && clients.length > 0) {
-    throw new Error("All Redis writes failed");
-  }
+// Start health checks if not in a build context
+if (!import.meta.env.SSR) {
+  scheduleHealthChecks();
 }
 
 /**
- * Store a feed mapping in Redis
+ * Store a feed mapping in Redis with automatic failover
  */
 export async function storeFeedMapping(
   feedId: string,
@@ -185,19 +236,24 @@ export async function storeFeedMapping(
     created_at: new Date().toISOString() 
   };
   
-  await writeToAllRedis(async (redis) =>
-    redis.set(feedId, JSON.stringify(mapping), "EX", DEFAULT_CACHE_TTL)
-  );
+  try {
+    const redis = await getRedisClient(); // This already handles failover
+    await redis.set(feedId, JSON.stringify(mapping), "EX", DEFAULT_CACHE_TTL);
+    console.log(`Successfully stored mapping for feed ${feedId}`);
+  } catch (error) {
+    console.error(`Error storing feed mapping for ${feedId}:`, error);
+    throw error;
+  }
 }
 
 /**
- * Retrieve a feed mapping from Redis
+ * Retrieve a feed mapping from Redis with automatic failover
  */
 export async function getFeedMapping(
   feedId: string
 ): Promise<FeedMapping | null> {
   try {
-    const redis = await getRedisClient();
+    const redis = await getRedisClient(); // This already handles failover
     const mapping = await redis.get(feedId);
     
     if (!mapping) return null;
@@ -227,7 +283,7 @@ export async function warmChapterCache(
 ): Promise<void> {
   try {
     console.log(`Warming chapter cache for ${slugs.length} comics in ${lang}`);
-    const redis = await getRedisClient();
+    const redis = await getRedisClient(); // This already handles failover
     
     // Validate slugs
     const validSlugs = slugs.filter(slug => 
