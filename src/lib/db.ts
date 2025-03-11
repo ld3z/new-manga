@@ -22,9 +22,13 @@ const REPLICA_URLS = [
   import.meta.env.REPLICA_REDIS_URL_1 ||
     process.env.REPLICA_REDIS_URL_1 ||
     import.meta.env.REPLICA_REDIS_URL,
-  import.meta.env.REPLICA_REDIS_URL_2 || process.env.REPLICA_REDIS_URL_2,
+  import.meta.env.REPLICA_REDIS_URL_2 || process.env.REPLICA_REPLICA_URL_2 || process.env.REPLICA_REDIS_URL_2,
   import.meta.env.REPLICA_REDIS_URL_3 || process.env.REPLICA_REDIS_URL_3,
 ].filter(Boolean) as string[];
+
+// Log available Redis instances
+console.log(`Primary Redis URL: ${PRIMARY_REDIS_URL ? 'Available' : 'Not configured'}`);
+console.log(`Replica URLs available: ${REPLICA_URLS.length}`);
 
 // Singleton clients with health status tracking
 let primaryClient: Redis | null = null;
@@ -79,6 +83,7 @@ async function createRedisClient(url: string): Promise<Redis> {
     throw new Error("Redis URL not provided");
   }
 
+  console.log(`Creating Redis client for ${getRedisName(url)}: ${url.slice(0, 20)}...`);
   const redisName = getRedisName(url);
   
   const client = new Redis(url, {
@@ -128,6 +133,40 @@ async function createRedisClient(url: string): Promise<Redis> {
     });
 
   return client;
+}
+
+/**
+ * Initialize all replicas to establish connections early
+ */
+async function initializeAllClients(): Promise<void> {
+  try {
+    // Initialize primary
+    if (PRIMARY_REDIS_URL && (!primaryClient || primaryClient.status !== "ready")) {
+      primaryClient = await createRedisClient(PRIMARY_REDIS_URL);
+      primaryHealthy = await checkConnection(primaryClient, "Primary");
+      console.log(`Primary Redis initialized, healthy: ${primaryHealthy}`);
+    }
+    
+    // Initialize all replicas
+    for (const url of REPLICA_URLS) {
+      if (!replicaClients.has(url)) {
+        try {
+          const client = await createRedisClient(url);
+          const isHealthy = await checkConnection(client, getRedisName(url));
+          if (isHealthy) {
+            replicaClients.set(url, client);
+            console.log(`Replica ${getRedisName(url)} initialized successfully`);
+          }
+        } catch (error) {
+          console.error(`Failed to initialize replica ${getRedisName(url)}:`, error);
+        }
+      }
+    }
+    
+    console.log(`Initialized ${replicaClients.size} replica connections`);
+  } catch (error) {
+    console.error("Error during client initialization:", error);
+  }
 }
 
 /**
@@ -219,14 +258,73 @@ export async function getRedisClient(): Promise<Redis> {
 }
 
 /**
- * Add an operation to the buffer for replication
+ * Get all available replicas that are not the active client
  */
-function bufferOperation(operation: RedisOperation): void {
-  operationBuffer.push(operation);
+async function getAvailableReplicas(activeClientUrl: string): Promise<Redis[]> {
+  const availableReplicas: Redis[] = [];
   
-  // If buffer exceeds size limit, trigger a sync
-  if (operationBuffer.length >= SYNC_BUFFER_SIZE) {
-    syncReplicas().catch(err => console.error("Failed to sync replicas:", err));
+  // Initialize clients if not already done
+  await initializeAllClients();
+  
+  // Check each replica
+  for (const [url, client] of replicaClients.entries()) {
+    if (url !== activeClientUrl && client.status === "ready") {
+      try {
+        const isHealthy = await checkConnection(client, getRedisName(url));
+        if (isHealthy) {
+          availableReplicas.push(client);
+        }
+      } catch (error) {
+        console.error(`Error checking replica ${getRedisName(url)}:`, error);
+      }
+    }
+  }
+  
+  console.log(`Found ${availableReplicas.length} available replicas for replication`);
+  return availableReplicas;
+}
+
+/**
+ * Immediately replicate a Redis operation to all available replicas
+ */
+async function replicateOperation(
+  activeClientUrl: string,
+  key: string, 
+  value: string, 
+  ttl?: number
+): Promise<void> {
+  try {
+    // Get available replicas that are not the active client
+    const replicas = await getAvailableReplicas(activeClientUrl);
+    
+    if (replicas.length === 0) {
+      console.log('No available replicas for replication');
+      return;
+    }
+    
+    console.log(`Replicating operation for key ${key} to ${replicas.length} replicas`);
+    
+    // Replicate to each available replica
+    const replicationPromises = replicas.map(async (replica) => {
+      try {
+        if (ttl) {
+          await replica.set(key, value, 'EX', ttl);
+        } else {
+          await replica.set(key, value);
+        }
+        return true;
+      } catch (error) {
+        console.error(`Replication failed for key ${key}:`, error);
+        return false;
+      }
+    });
+    
+    const results = await Promise.allSettled(replicationPromises);
+    const successful = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
+    
+    console.log(`Successfully replicated to ${successful}/${replicas.length} replicas`);
+  } catch (error) {
+    console.error('Error during replication:', error);
   }
 }
 
@@ -252,7 +350,7 @@ async function syncFromReplicaToPrimary(replicaUrl: string): Promise<void> {
       const [nextCursor, keys] = await replicaClient.scan(
         cursor, 
         'MATCH', 
-        '[a-f0-9]*', // Match feed IDs (hex format)
+        '[0-9a-f]*', // Match feed IDs (hex format)
         'COUNT',
         '100'
       );
@@ -260,6 +358,25 @@ async function syncFromReplicaToPrimary(replicaUrl: string): Promise<void> {
       cursor = nextCursor;
       feedKeys.push(...keys);
     } while (cursor !== '0');
+    
+    // Also try scanning for any key pattern that might be a feed ID
+    cursor = '0';
+    const additionalKeys: string[] = [];
+    
+    do {
+      const [nextCursor, keys] = await replicaClient.scan(
+        cursor,
+        'MATCH',
+        'feed:*', // Try another pattern
+        'COUNT',
+        '100'
+      );
+      
+      cursor = nextCursor;
+      additionalKeys.push(...keys);
+    } while (cursor !== '0');
+    
+    feedKeys.push(...additionalKeys);
     
     // Get chapter cache keys
     const chapterKeys: string[] = [];
@@ -322,98 +439,7 @@ async function syncFromReplicaToPrimary(replicaUrl: string): Promise<void> {
 }
 
 /**
- * Synchronize operations from buffer to all replicas
- */
-async function syncReplicas(): Promise<void> {
-  if (operationBuffer.length === 0) return;
-  
-  // Get operations to sync and clear buffer
-  const operations = [...operationBuffer];
-  operationBuffer.length = 0;
-  
-  // Skip if no operations or no replicas
-  if (operations.length === 0 || replicaClients.size === 0) return;
-  
-  console.log(`Syncing ${operations.length} operations to ${replicaClients.size} replicas...`);
-  
-  // Process each replica
-  const syncPromises = Array.from(replicaClients.entries()).map(async ([url, client]) => {
-    try {
-      if (client.status !== "ready" || !(await checkConnection(client, getRedisName(url)))) {
-        return;
-      }
-      
-      const pipeline = client.pipeline();
-      
-      // Add all operations to pipeline
-      for (const op of operations) {
-        if (op.type === 'set') {
-          if (op.ttl) {
-            pipeline.set(op.key, op.value, 'EX', op.ttl);
-          } else {
-            pipeline.set(op.key, op.value);
-          }
-        } else if (op.type === 'del') {
-          pipeline.del(op.key);
-        }
-      }
-      
-      // Execute pipeline
-      await pipeline.exec();
-      console.log(`Successfully synced ${operations.length} operations to ${getRedisName(url)}`);
-    } catch (error) {
-      console.error(`Error syncing to ${getRedisName(url)}:`, error);
-    }
-  });
-  
-  await Promise.allSettled(syncPromises);
-}
-
-/**
- * Schedule periodic health checks to detect when primary recovers
- */
-function scheduleHealthChecks() {
-  if (typeof setInterval === 'undefined') return; // Skip in environments without setInterval
-
-  // Check primary health
-  setInterval(async () => {
-    if (!primaryHealthy && primaryClient) {
-      try {
-        const isPrimaryHealthy = await checkConnection(primaryClient, "Primary");
-        if (isPrimaryHealthy) {
-          console.log("Primary Redis recovered");
-          primaryHealthy = true;
-          primaryFailedChecks = 0;
-          
-          // If we used a replica when primary was down, sync data back
-          if (lastUsedReplica) {
-            syncFromReplicaToPrimary(lastUsedReplica).catch(err => 
-              console.error(`Failed to sync from replica to primary: ${err}`));
-          }
-        } else {
-          primaryFailedChecks++;
-          console.log(`Primary still unhealthy, failed checks: ${primaryFailedChecks}`);
-        }
-      } catch (err) {
-        primaryFailedChecks++;
-        console.error("Health check for primary Redis failed:", err);
-      }
-    }
-  }, HEALTH_CHECK_INTERVAL);
-  
-  // Schedule regular replica sync
-  setInterval(async () => {
-    await syncReplicas().catch(err => console.error("Failed to sync replicas:", err));
-  }, SYNC_INTERVAL);
-}
-
-// Start health checks and sync if not in a build context
-if (!import.meta.env.SSR) {
-  scheduleHealthChecks();
-}
-
-/**
- * Store a feed mapping in Redis with automatic failover and replication
+ * Store a feed mapping in Redis with immediate replication
  */
 export async function storeFeedMapping(
   feedId: string,
@@ -431,23 +457,13 @@ export async function storeFeedMapping(
   try {
     // First write to primary/active client
     const redis = await getRedisClient(); // This already handles failover
+    const activeUrl = redis.options.host || '';
+    
     await redis.set(feedId, stringValue, "EX", DEFAULT_CACHE_TTL);
     console.log(`Successfully stored mapping for feed ${feedId}`);
     
-    // Buffer operation for replication to other instances
-    bufferOperation({
-      key: feedId,
-      value: stringValue,
-      ttl: DEFAULT_CACHE_TTL,
-      type: 'set',
-      timestamp: Date.now()
-    });
-    
-    // If we're writing to a replica because primary is down, force immediate sync
-    // to other replicas to ensure consistent data
-    if (!primaryHealthy && lastUsedReplica) {
-      await syncReplicas().catch(err => console.error("Failed to sync replicas after write:", err));
-    }
+    // Immediately replicate to other instances
+    await replicateOperation(activeUrl, feedId, stringValue, DEFAULT_CACHE_TTL);
   } catch (error) {
     console.error(`Error storing feed mapping for ${feedId}:`, error);
     throw error;
@@ -467,16 +483,12 @@ export async function getFeedMapping(
     if (!mapping) return null;
     
     // Reset expiration on access
+    const activeUrl = redis.options.host || '';
     await redis.expire(feedId, DEFAULT_CACHE_TTL);
     
-    // Buffer this TTL-reset operation for replication
-    bufferOperation({
-      key: feedId,
-      value: mapping,
-      ttl: DEFAULT_CACHE_TTL,
-      type: 'set',
-      timestamp: Date.now()
-    });
+    // Also reset TTL on other replicas
+    replicateOperation(activeUrl, feedId, mapping, DEFAULT_CACHE_TTL)
+      .catch(err => console.error(`Failed to reset TTL on replicas for ${feedId}:`, err));
     
     try {
       const data = JSON.parse(mapping);
@@ -559,5 +571,12 @@ export async function warmChapterCache(
   }
 }
 
-// Initialize connections lazily
+// Initialize connections eagerly to establish connections as soon as possible
+if (!import.meta.env.SSR) {
+  initializeAllClients()
+    .then(() => console.log("Redis clients initialized"))
+    .catch(err => console.error("Failed to initialize Redis clients:", err));
+}
+
+// Initialize connections lazily as backup
 console.log("Redis will connect on first use");
