@@ -2,9 +2,6 @@ import type { APIRoute } from "astro";
 import { createHash } from 'crypto';
 import { storeFeedMapping } from '../../lib/db';
 
-// In-memory storage (replace with database in production)
-const feedMappings = new Map<string, { slugs: string[], lang: string }>();
-
 export const POST: APIRoute = async ({ request }) => {
   try {
     const { slugs, lang } = await request.json();
@@ -17,7 +14,7 @@ export const POST: APIRoute = async ({ request }) => {
     const dataString = `${slugs.sort().join(',')}:${lang}`;
     const hash = createHash('md5').update(dataString).digest('hex').slice(0, 8);
 
-    // Store the mapping in Vercel KV
+    // Store the mapping in Redis
     await storeFeedMapping(hash, slugs, lang);
 
     return new Response(JSON.stringify({ feedId: hash }), {
@@ -30,7 +27,4 @@ export const POST: APIRoute = async ({ request }) => {
     console.error('Error creating feed:', error);
     return new Response("Internal server error", { status: 500 });
   }
-};
-
-// Export the mappings for use in other files
-export { feedMappings }; 
+}; 

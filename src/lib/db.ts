@@ -2,11 +2,18 @@ import Redis from "ioredis";
 import type { FeedMapping } from "./types";
 import { getChaptersForSlugs } from "./api";
 
-// Redis URLs
+// Configuration constants
+const DEFAULT_CACHE_TTL = 60 * 60 * 24 * 30; // 30 days
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 50;
+const IS_VERCEL = process.env.VERCEL || false;
+
+// Redis URLs from environment variables
 const PRIMARY_REDIS_URL =
   import.meta.env.PRIMARY_REDIS_URL ||
   process.env.PRIMARY_REDIS_URL ||
   process.env.REDIS_URL;
+
 const REPLICA_URLS = [
   import.meta.env.REPLICA_REDIS_URL_1 ||
     process.env.REPLICA_REDIS_URL_1 ||
@@ -15,31 +22,43 @@ const REPLICA_URLS = [
   import.meta.env.REPLICA_REDIS_URL_3 || process.env.REPLICA_REDIS_URL_3,
 ].filter(Boolean) as string[];
 
-const IS_VERCEL = process.env.VERCEL || false;
-const DEFAULT_CACHE_TTL = 60 * 60 * 24 * 30; // 30 days
-const MAX_RETRIES = 3; // Reduced retries to avoid Vercel timeout
-const BASE_DELAY_MS = 50; // Faster retries for serverless
-
 // Singleton clients
 let primaryClient: Redis | null = null;
 let replicaClients: Map<string, Redis> = new Map();
 
 // Redis instance naming for logging
 const redisInstanceNames = new Map<string, string>();
+
+/**
+ * Initialize Redis instance names for better logging
+ */
 function initializeRedisNames() {
-  redisInstanceNames.set(PRIMARY_REDIS_URL!, "Primary");
+  if (PRIMARY_REDIS_URL) {
+    redisInstanceNames.set(PRIMARY_REDIS_URL, "Primary");
+  }
+  
   REPLICA_URLS.forEach((url, index) =>
     redisInstanceNames.set(url, `Replica ${index + 1}`)
   );
 }
+
 initializeRedisNames();
+
+/**
+ * Get the friendly name of a Redis instance
+ */
 const getRedisName = (url: string) => redisInstanceNames.get(url) || "Unknown";
 
-// Create Redis client with Vercel-optimized settings
+/**
+ * Create a new Redis client with optimized settings
+ */
 async function createRedisClient(url: string): Promise<Redis> {
-  if (!url) throw new Error("Redis URL not set");
+  if (!url) {
+    throw new Error("Redis URL not provided");
+  }
 
   const redisName = getRedisName(url);
+  
   const client = new Redis(url, {
     retryStrategy: (times) => {
       if (times >= MAX_RETRIES) return null;
@@ -54,13 +73,14 @@ async function createRedisClient(url: string): Promise<Redis> {
     enableReadyCheck: true,
     connectTimeout: IS_VERCEL ? 5000 : 10000, // 5s for Vercel, 10s local
     keepAlive: IS_VERCEL ? 2000 : 10000, // 2s ping for Vercel
-    commandTimeout: 5000, // Align with Vercel’s Hobby tier timeout
+    commandTimeout: 5000, // Align with Vercel's timeout
     reconnectOnError: (err) =>
       ["READONLY", "ETIMEDOUT", "ECONNRESET"].some((e) =>
         err.message.includes(e)
       ),
   });
 
+  // Setup event listeners
   client
     .on("ready", () => console.log(`${redisName} ready`))
     .on("error", (err) => console.error(`${redisName} error:`, err))
@@ -70,28 +90,36 @@ async function createRedisClient(url: string): Promise<Redis> {
   return client;
 }
 
-// Get or create a Redis client
-async function getRedisClient(): Promise<Redis> {
-  const checkConnection = async (client: Redis, name: string) => {
-    try {
-      await Promise.race([
-        client.ping(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("Ping timeout")), 2000)
-        ),
-      ]);
-      return true;
-    } catch (err) {
-      console.warn(`${name} ping failed:`, err);
-      return false;
-    }
-  };
+/**
+ * Check if a Redis client is connected and responsive
+ */
+async function checkConnection(client: Redis, name: string): Promise<boolean> {
+  try {
+    await Promise.race([
+      client.ping(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Ping timeout")), 2000)
+      ),
+    ]);
+    return true;
+  } catch (err) {
+    console.warn(`${name} ping failed:`, err);
+    return false;
+  }
+}
 
+/**
+ * Get an active Redis client from the pool
+ */
+async function getRedisClient(): Promise<Redis> {
   // Try primary client
   if (!primaryClient || primaryClient.status !== "ready") {
     primaryClient = await createRedisClient(PRIMARY_REDIS_URL!);
   }
-  if (await checkConnection(primaryClient, "Primary")) return primaryClient;
+  
+  if (await checkConnection(primaryClient, "Primary")) {
+    return primaryClient;
+  }
 
   // Try replicas
   for (const url of REPLICA_URLS) {
@@ -100,7 +128,10 @@ async function getRedisClient(): Promise<Redis> {
       client = await createRedisClient(url);
       replicaClients.set(url, client);
     }
-    if (await checkConnection(client, getRedisName(url))) return client;
+    
+    if (await checkConnection(client, getRedisName(url))) {
+      return client;
+    }
   }
 
   // Fallback: Force new primary connection
@@ -108,7 +139,9 @@ async function getRedisClient(): Promise<Redis> {
   return primaryClient;
 }
 
-// Write to all Redis instances
+/**
+ * Write data to all available Redis instances
+ */
 async function writeToAllRedis(
   operation: (redis: Redis) => Promise<any>
 ): Promise<void> {
@@ -116,6 +149,7 @@ async function writeToAllRedis(
     primaryClient,
     ...Array.from(replicaClients.values()),
   ].filter(Boolean) as Redis[];
+  
   const errors: Error[] = [];
 
   for (const client of clients) {
@@ -132,33 +166,55 @@ async function writeToAllRedis(
     }
   }
 
-  if (errors.length === clients.length) {
+  if (errors.length === clients.length && clients.length > 0) {
     throw new Error("All Redis writes failed");
   }
 }
 
-// Your existing functions (unchanged except for using getRedisClient/writeToAllRedis)
+/**
+ * Store a feed mapping in Redis
+ */
 export async function storeFeedMapping(
   feedId: string,
   slugs: string[],
   lang: string
 ): Promise<void> {
-  const mapping = { slugs, lang, created_at: new Date().toISOString() };
+  const mapping = { 
+    slugs, 
+    lang, 
+    created_at: new Date().toISOString() 
+  };
+  
   await writeToAllRedis(async (redis) =>
     redis.set(feedId, JSON.stringify(mapping), "EX", DEFAULT_CACHE_TTL)
   );
 }
 
+/**
+ * Retrieve a feed mapping from Redis
+ */
 export async function getFeedMapping(
   feedId: string
 ): Promise<FeedMapping | null> {
-  const redis = await getRedisClient();
-  const mapping = await redis.get(feedId);
-  if (!mapping) return null;
-  await redis.expire(feedId, DEFAULT_CACHE_TTL);
-  const data = JSON.parse(mapping);
-  return { slugs: data.slugs, lang: data.lang };
+  try {
+    const redis = await getRedisClient();
+    const mapping = await redis.get(feedId);
+    
+    if (!mapping) return null;
+    
+    // Reset expiration on access
+    await redis.expire(feedId, DEFAULT_CACHE_TTL);
+    
+    const data = JSON.parse(mapping);
+    return { 
+      slugs: data.slugs, 
+      lang: data.lang 
+    };
+  } catch (error) {
+    console.error(`Error retrieving feed mapping for ${feedId}:`, error);
+    return null;
+  }
 }
 
-// Initialize connections lazily (no blocking startup)
+// Initialize connections lazily
 console.log("Redis will connect on first use");
