@@ -1,9 +1,9 @@
 import Redis from "ioredis";
 import type { FeedMapping } from "./types";
-import { getChaptersForSlugs } from "./api";
 
 // Configuration constants
 const DEFAULT_CACHE_TTL = 60 * 60 * 24 * 30; // 30 days
+export const CHAPTER_CACHE_TTL = 60 * 60; // 1 hour
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 50;
 const IS_VERCEL = process.env.VERCEL || false;
@@ -213,6 +213,71 @@ export async function getFeedMapping(
   } catch (error) {
     console.error(`Error retrieving feed mapping for ${feedId}:`, error);
     return null;
+  }
+}
+
+/**
+ * Pre-warm the chapter cache for better performance
+ * This function checks cache status and uses the getChaptersForSlugs function from api.ts 
+ * to fetch and cache data in the background
+ */
+export async function warmChapterCache(
+  slugs: string[],
+  lang: string
+): Promise<void> {
+  try {
+    console.log(`Warming chapter cache for ${slugs.length} comics in ${lang}`);
+    const redis = await getRedisClient();
+    
+    // Validate slugs
+    const validSlugs = slugs.filter(slug => 
+      slug && typeof slug === 'string' && slug.match(/^[a-z0-9-]+$/));
+    
+    if (validSlugs.length !== slugs.length) {
+      console.warn(`Filtered out ${slugs.length - validSlugs.length} invalid slugs`);
+    }
+    
+    // Check which slugs are already in cache
+    const pipeline = redis.pipeline();
+    const cacheKeys = validSlugs.map(slug => `chapters:${slug}:${lang}`);
+    
+    cacheKeys.forEach(key => {
+      pipeline.exists(key);
+    });
+    
+    const results = await pipeline.exec();
+    const slugsToFetch: string[] = [];
+    
+    results?.forEach(([err, exists], index) => {
+      if (err) {
+        console.error(`Error checking cache for ${cacheKeys[index]}:`, err);
+        slugsToFetch.push(validSlugs[index]);
+      } else if (!exists) {
+        slugsToFetch.push(validSlugs[index]);
+      }
+    });
+    
+    if (slugsToFetch.length === 0) {
+      console.log('All chapters already in cache, no warming needed');
+      return;
+    }
+    
+    console.log(`Cache miss for ${slugsToFetch.length} comics - starting background fetch`);
+    
+    // To avoid circular dependencies, we'll import getChaptersForSlugs dynamically
+    const { getChaptersForSlugs } = await import('./api');
+    
+    // Start fetching in the background without waiting for the result
+    getChaptersForSlugs(slugsToFetch, lang)
+      .then(chapters => {
+        console.log(`Successfully warmed cache with ${chapters.length} chapters`);
+      })
+      .catch(error => {
+        console.error('Error warming chapter cache:', error);
+      });
+
+  } catch (error) {
+    console.error('Error in warmChapterCache:', error);
   }
 }
 

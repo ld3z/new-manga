@@ -1,5 +1,5 @@
-import type { Comic, Genre, ComicType } from './types';
-import { getRedisClient } from './db';
+import type { Comic, Genre, ComicType, ChapterDetail } from './types';
+import { getRedisClient, CHAPTER_CACHE_TTL } from './db';
 
 const languageMap = {
   "en": "English",
@@ -139,20 +139,6 @@ interface ComicDetail {
   };
 }
 
-interface ChapterDetail {
-  id: string;
-  chap: string;
-  title: string;
-  updated_at: string;
-  md_comics: {
-    title: string;
-    slug: string;
-    md_covers?: {
-      b2key: string;
-    }[];
-  };
-}
-
 interface ChapterParams {
   limit?: number;
   lang?: string;
@@ -270,7 +256,6 @@ export async function getChaptersForSlugs(
 ): Promise<ChapterDetail[]> {
   console.log(`Fetching chapters for ${slugs.length} comics`);
   const redis = await getRedisClient();
-  const CACHE_TTL = 60 * 60;
   
   const uniqueSlugs = [...new Set(slugs)];
   const pipeline = redis.pipeline();
@@ -293,7 +278,7 @@ export async function getChaptersForSlugs(
   cacheResults.forEach(([err, result], index) => {
     if (!err && result) {
       try {
-        const parsed = JSON.parse(result);
+        const parsed = JSON.parse(result as string);
         if (Array.isArray(parsed)) {
           cachedChapters.push(...parsed);
         }
@@ -351,7 +336,7 @@ export async function getChaptersForSlugs(
       cacheKey, 
       JSON.stringify(chaps), 
       'EX', 
-      CACHE_TTL
+      CHAPTER_CACHE_TTL
     );
   });
 
@@ -360,10 +345,18 @@ export async function getChaptersForSlugs(
   // Combine and sort all chapters
   const allChapters = [...cachedChapters, ...liveChapters];
   const deduplicatedChapters = deduplicateChapters(allChapters);
-  return deduplicatedChapters.sort((a, b) => 
-    parseFloat(b.chap) - parseFloat(a.chap) ||
-    new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-  );
+  return deduplicatedChapters.sort((a, b) => {
+    // Ensure the created_at fields are valid dates
+    const dateA = new Date(a.created_at).getTime();
+    const dateB = new Date(b.created_at).getTime();
+    
+    // First try to sort by chapter number
+    const chapDiff = parseFloat(b.chap) - parseFloat(a.chap);
+    if (!isNaN(chapDiff)) return chapDiff;
+    
+    // Fall back to date if chapter numbers are equal or invalid
+    return dateB - dateA;
+  });
 }
 
 // Add export to the validation function
