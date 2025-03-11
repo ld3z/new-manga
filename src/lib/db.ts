@@ -111,7 +111,7 @@ async function checkConnection(client: Redis, name: string): Promise<boolean> {
 /**
  * Get an active Redis client from the pool
  */
-async function getRedisClient(): Promise<Redis> {
+export async function getRedisClient(): Promise<Redis> {
   // Try primary client
   if (!primaryClient || primaryClient.status !== "ready") {
     primaryClient = await createRedisClient(PRIMARY_REDIS_URL!);
