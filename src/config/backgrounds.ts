@@ -33,7 +33,7 @@ export const backgrounds: BackgroundImage[] = [
     source: "https://danbooru.donmai.us/posts/6900673",
     socials: [
       {
-        name: "Twitter",
+        name: "Artist's Twitter",
         link: "https://twitter.com/ayanagi0319",
       },
     ],
@@ -45,7 +45,7 @@ export const backgrounds: BackgroundImage[] = [
     source: "https://danbooru.donmai.us/posts/8743208",
     socials: [
       {
-        name: "Twitter",
+        name: "Artist's Twitter",
         link: "https://x.com/kamepan44231",
       },
     ],
@@ -57,7 +57,7 @@ export const backgrounds: BackgroundImage[] = [
     source: "https://danbooru.donmai.us/posts/8074444",
     socials: [
       {
-        name: "Twitter",
+        name: "Artist's Twitter",
         link: "https://x.com/Ten_0123_/",
       },
     ],
@@ -69,8 +69,8 @@ export const backgrounds: BackgroundImage[] = [
     source: "https://www.pixiv.net/en/artworks/124222053",
     socials: [
       {
-        name: "Twitter",
-        link: "https://twitter.com/greatodoggo",
+        name: "Artist's Twitter",
+        link: "https://x.com/greatodoggo",
       },
     ],
   },
@@ -81,7 +81,7 @@ export const backgrounds: BackgroundImage[] = [
     source: "https://safebooru.org/index.php?page=post&s=view&id=5418793",
     socials: [
       {
-        name: "Twitter",
+        name: "Artist's Twitter",
         link: "https://x.com/soaphisoap",
       },
     ],
@@ -93,7 +93,7 @@ export const backgrounds: BackgroundImage[] = [
     source: "https://safebooru.org/index.php?page=post&s=view&id=5531630",
     socials: [
       {
-        name: "Twitter",
+        name: "Artist's Twitter",
         link: "https://x.com/charlieinoni",
       },
     ],
@@ -106,8 +106,56 @@ export const backgrounds: BackgroundImage[] = [
       "https://i.pximg.net/img-original/img/2025/03/03/15/13/24/127822472_p0.png",
     socials: [
       {
-        name: "Twitter",
+        name: "Artist's Twitter",
         link: "https://x.com/",
+      },
+    ],
+  },
+  {
+    url: "/cynthia1.webp",
+    title: "Cynthia (Pokemon)",
+    artist: "???",
+    source: "https://safebooru.org/index.php?page=post&s=view&id=5547740",
+    socials: [
+      {
+        name: "Artist's Twitter",
+        link: "https://x.com/",
+      },
+    ],
+  },
+  {
+    url: "/darling.webp",
+    title: "Zero Two",
+    artist: "AWZ",
+    source: "https://www.pixiv.net/en/artworks/123110068",
+    socials: [
+      {
+        name: "Pixiv Profile",
+        link: "https://www.pixiv.net/en/users/67355371",
+      },
+    ],
+  },
+  {
+    url: "/granny.webp",
+    title: "Turbo Granny (Dandadan)",
+    artist: "MajimartBCN",
+    source: "https://twitter.com/MajimartBCN/status/1864741369383694841",
+    socials: [
+      {
+        name: "Artist's Twitter",
+        link: "https://x.com/MajimartBCN",
+      },
+    ],
+  },
+  {
+    url: "/numi_lily.webp",
+    title: "Nihmune & Shylily",
+    artist: "Gryever_AW",
+    source: "https://x.com/gryever_aw/status/1890772686084686118",
+    socials: [
+      {
+        name: "Artist's Twitter",
+        link: "https://x.com/Gryever_AW",
       },
     ],
   },
