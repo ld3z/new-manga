@@ -510,16 +510,21 @@ export async function getFeedMapping(
     if (compressedData) {
       console.log(`[getFeedMapping] SUCCESS: Found compressed data for ${feedId} on ${clientName}`);
       try {
-        // Decompress and parse (still needed to return the correct format)
+        // Decompress and parse
         const buffer = Buffer.from(compressedData, 'base64');
         const decompressed = await gunzip(buffer);
         const data = JSON.parse(decompressed.toString());
 
-        // --- Replicate the COMPRESSED data using ensurePrimaryAndReplicate ---
+        // --- Add back direct expire on the source client ---
+        console.log(`[getFeedMapping] Resetting TTL directly on source ${clientName} for compressed key ${compressedKey}`);
+        client.expire(compressedKey, DEFAULT_CACHE_TTL)
+            .catch(err => console.warn(`[getFeedMapping] Failed direct TTL reset on ${clientName} for ${compressedKey}:`, err));
+        // --- End Add back ---
+
+        // Replicate the COMPRESSED data using ensurePrimaryAndReplicate
         console.log(`[getFeedMapping] Triggering DATA replication for compressed key ${compressedKey}`);
-        ensurePrimaryAndReplicate(clientUrl, compressedKey, compressedData, DEFAULT_CACHE_TTL) // Pass raw compressedData
+        ensurePrimaryAndReplicate(clientUrl, compressedKey, compressedData, DEFAULT_CACHE_TTL)
             .catch(err => console.error(`[getFeedMapping] Error during background DATA replication for ${compressedKey}:`, err));
-        // --- End Change ---
 
         return {
           slugs: data.slugs,
@@ -538,12 +543,12 @@ export async function getFeedMapping(
     console.log(`[getFeedMapping] Checking for regular key: ${regularKey} on ${clientName}`);
     let jsonString = await client.get(regularKey); // This is the JSON string
 
-    // --- Variables to track source if found on replica ---
+    // Variables to track source if found on replica
     let foundOnReplica = false;
     let replicaUrlSource: string | null = null;
+    let replicaClientSource: Redis | null = null; // Store the replica client instance
     let valueFromReplica: string | null = null; // Store value found on replica
     let isValueFromReplicaCompressed = false; // Track if replica value was compressed
-    // ---
 
     if (jsonString) {
         console.log(`[getFeedMapping] SUCCESS: Found regular key ${regularKey} on ${clientName}`);
@@ -558,38 +563,42 @@ export async function getFeedMapping(
          const replicaName = getRedisName(replicaUrl);
         if (replicaClient.status === "ready") {
           try {
-            console.log(`[getFeedMapping] Checking replica ${replicaName} for key ${regularKey}`);
             // Check compressed key on replica first
             const replicaCompressedData = await replicaClient.get(compressedKey); // Base64 string
             if (replicaCompressedData) {
                 console.log(`[getFeedMapping] SUCCESS: Found COMPRESSED key ${compressedKey} on REPLICA ${replicaName}`);
                  try {
-                    // Decompress for return value, but store the raw compressed data for replication
+                    // Decompress for return value
                     const buffer = Buffer.from(replicaCompressedData, 'base64');
                     const decompressed = await gunzip(buffer);
                     const data = JSON.parse(decompressed.toString());
 
-                    // --- Replicate the COMPRESSED data found on replica ---
+                    // --- Add back direct expire on the source replica client ---
+                    console.log(`[getFeedMapping] Resetting TTL directly on source ${replicaName} for compressed key ${compressedKey}`);
+                    replicaClient.expire(compressedKey, DEFAULT_CACHE_TTL)
+                       .catch(err => console.warn(`[getFeedMapping] Failed direct TTL reset on ${replicaName} for ${compressedKey}:`, err));
+                    // --- End Add back ---
+
+                    // Replicate the COMPRESSED data found on replica
                     console.log(`[getFeedMapping] Triggering DATA replication for compressed key ${compressedKey} (found on replica ${replicaName})`);
-                    ensurePrimaryAndReplicate(replicaUrl, compressedKey, replicaCompressedData, DEFAULT_CACHE_TTL) // Pass raw replicaCompressedData
+                    ensurePrimaryAndReplicate(replicaUrl, compressedKey, replicaCompressedData, DEFAULT_CACHE_TTL)
                          .catch(err => console.error(`[getFeedMapping] Error during background DATA replication for ${compressedKey}:`, err));
-                    // --- End Change ---
 
                     return { slugs: data.slugs, lang: data.lang };
                  } catch (error) {
                     console.error(`[getFeedMapping] Error decompressing data for ${feedId} from REPLICA ${replicaName}:`, error);
                  }
             } else {
-                 console.log(`[getFeedMapping] No compressed key found on replica ${replicaName}. Checking regular key ${regularKey}...`);
+                 // Check regular key on replica
                  const replicaJsonString = await replicaClient.get(regularKey); // JSON string
                  if (replicaJsonString) {
                    console.log(`[getFeedMapping] SUCCESS: Found REGULAR key ${regularKey} on REPLICA ${replicaName}`);
                    foundOnReplica = true;
                    replicaUrlSource = replicaUrl;
+                   replicaClientSource = replicaClient; // Store the client instance
                    valueFromReplica = replicaJsonString; // Store the value found
                    isValueFromReplicaCompressed = false; // Mark as not compressed
                    jsonString = replicaJsonString; // Use this value going forward
-
                    break; // Found on this replica, stop checking others
                  } else {
                     console.log(`[getFeedMapping] No regular key found on replica ${replicaName}.`);
@@ -611,16 +620,21 @@ export async function getFeedMapping(
         return null;
     }
 
-    // --- Replicate the REGULAR data using ensurePrimaryAndReplicate ---
-    // This block is reached if the regular key was found (either initially or on a replica)
-    // AND the compressed key was not found anywhere.
+    // --- Add back direct expire on the source client (primary or replica) ---
+    const sourceClientForExpire = foundOnReplica ? replicaClientSource! : client;
+    const sourceClientNameForExpire = foundOnReplica ? getRedisName(replicaUrlSource!) : clientName;
+    console.log(`[getFeedMapping] Resetting TTL directly on source ${sourceClientNameForExpire} for regular key ${regularKey}`);
+    sourceClientForExpire.expire(regularKey, DEFAULT_CACHE_TTL)
+        .catch(err => console.warn(`[getFeedMapping] Failed direct TTL reset on ${sourceClientNameForExpire} for ${regularKey}:`, err));
+    // --- End Add back ---
+
+    // Replicate the REGULAR data using ensurePrimaryAndReplicate
     console.log(`[getFeedMapping] Triggering DATA replication for regular key ${regularKey}`);
     const sourceUrlForReplication = foundOnReplica ? replicaUrlSource! : clientUrl;
-    ensurePrimaryAndReplicate(sourceUrlForReplication, regularKey, jsonString, DEFAULT_CACHE_TTL) // Pass the jsonString
+    ensurePrimaryAndReplicate(sourceUrlForReplication, regularKey, jsonString, DEFAULT_CACHE_TTL)
         .catch(err => console.error(`[getFeedMapping] Error during background DATA replication for ${regularKey}:`, err));
-    // --- End Change ---
 
-    // Parse the result (jsonString has the data from either initial client or replica)
+    // Parse the result
     try {
         const data = JSON.parse(jsonString);
         return {
