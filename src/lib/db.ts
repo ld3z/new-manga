@@ -208,8 +208,9 @@ async function checkConnection(client: Redis, name: string): Promise<boolean> {
 /**
  * Get an active Redis client from the pool
  * Prioritizes primary, falls back to replicas
+ * Returns the client and its connection URL.
  */
-export async function getRedisClient(): Promise<Redis> {
+export async function getRedisClient(): Promise<{ client: Redis; url: string }> {
   // Try primary client first if it's considered healthy
   if (primaryHealthy && (primaryClient === null || primaryClient.status !== "ready")) {
     try {
@@ -219,7 +220,7 @@ export async function getRedisClient(): Promise<Redis> {
       if (isPrimaryConnected) {
         primaryFailedChecks = 0;
         console.log("Initialized primary Redis connection");
-        return primaryClient;
+        return { client: primaryClient, url: PRIMARY_REDIS_URL! }; // <-- Return URL
       }
     } catch (err) {
       console.error("Failed to initialize primary Redis:", err);
@@ -227,7 +228,15 @@ export async function getRedisClient(): Promise<Redis> {
       primaryFailedChecks++;
     }
   } else if (primaryHealthy && primaryClient && primaryClient.status === "ready") {
-    return primaryClient;
+    // Check connection just in case before returning
+    if (await checkConnection(primaryClient, "Primary")) {
+        return { client: primaryClient, url: PRIMARY_REDIS_URL! }; // <-- Return URL
+    } else {
+        console.warn("Primary client status was ready but ping failed. Marking unhealthy.");
+        primaryHealthy = false;
+        primaryFailedChecks++;
+        // Fall through to replica logic
+    }
   }
 
   // Primary is unhealthy, try to use the active replica if we have one
@@ -236,7 +245,7 @@ export async function getRedisClient(): Promise<Redis> {
     if (activeReplica.status === "ready" && await checkConnection(activeReplica, getRedisName(activeReplicaUrl))) {
       console.log(`Using active replica: ${getRedisName(activeReplicaUrl)}`);
       lastUsedReplica = activeReplicaUrl; // Track that we used this replica
-      return activeReplica;
+      return { client: activeReplica, url: activeReplicaUrl }; // <-- Return URL
     }
   }
 
@@ -248,21 +257,23 @@ export async function getRedisClient(): Promise<Redis> {
         client = await createRedisClient(url);
         replicaClients.set(url, client);
       }
-      
+
       if (await checkConnection(client, getRedisName(url))) {
         console.log(`Switching to replica: ${getRedisName(url)}`);
         activeReplicaUrl = url;
         lastUsedReplica = url; // Track that we used this replica
-        
+
         // If primary has been down for a while, promote this replica to be the new primary
         if (primaryFailedChecks >= REPLICA_PROMOTION_THRESHOLD) {
           console.log(`Promoting ${getRedisName(url)} to primary after ${primaryFailedChecks} failed checks`);
-          primaryClient = client;
+          primaryClient = client; // The client instance is now considered primary
           primaryHealthy = true;
           primaryFailedChecks = 0;
+          // Note: PRIMARY_REDIS_URL still points to the original primary config.
+          // The 'url' returned here is the replica's URL, which is correct for identifying the *current* primary instance.
         }
-        
-        return client;
+
+        return { client: client, url: url }; // <-- Return URL
       }
     } catch (err) {
       console.error(`Failed to connect to replica ${getRedisName(url)}:`, err);
@@ -271,8 +282,17 @@ export async function getRedisClient(): Promise<Redis> {
 
   // If all else fails, try one more time with primary
   console.warn("All Redis connections failed, making last attempt with primary");
-  primaryClient = await createRedisClient(PRIMARY_REDIS_URL!);
-  return primaryClient;
+  // Ensure primaryClient is re-initialized if it failed earlier
+  if (!primaryClient || primaryClient.status !== 'connecting' && primaryClient.status !== 'ready') {
+      try {
+          primaryClient = await createRedisClient(PRIMARY_REDIS_URL!);
+      } catch (err) {
+          console.error("Fatal: Failed to re-initialize primary Redis on last attempt:", err);
+          throw new Error("Could not establish any Redis connection."); // Throw if even last attempt fails
+      }
+  }
+  // Even if creation succeeded, we return it, subsequent operations might fail but we need to return *something*
+  return { client: primaryClient, url: PRIMARY_REDIS_URL! }; // <-- Return URL
 }
 
 /**
@@ -303,46 +323,118 @@ async function getAvailableReplicas(activeClientUrl: string): Promise<Redis[]> {
 }
 
 /**
- * Immediately replicate a Redis operation to all available replicas
+ * Ensures data is written to the primary instance (if available and not the source)
+ * and replicates to other available replicas.
  */
-async function replicateOperation(
-  activeClientUrl: string,
-  key: string, 
-  value: string, 
+async function ensurePrimaryAndReplicate(
+  sourceUrl: string, // The URL of the instance that initially received the write
+  key: string,
+  value: string,
   ttl?: number
 ): Promise<void> {
-  try {
-    // Get available replicas that are not the active client
-    const replicas = await getAvailableReplicas(activeClientUrl);
-    
-    if (replicas.length === 0) {
-      console.log('No available replicas for replication');
-      return;
-    }
-    
-    console.log(`Replicating operation for key ${key} to ${replicas.length} replicas`);
-    
-    // Replicate to each available replica
-    const replicationPromises = replicas.map(async (replica) => {
-      try {
-        if (ttl) {
-          await replica.set(key, value, 'EX', ttl);
-        } else {
-          await replica.set(key, value);
+  const replicationTasks: Promise<any>[] = [];
+  const targetUrls = new Set<string>(); // Keep track of where we tried to write/replicate
+
+  const operationDesc = ttl ? `set ${key} EX ${ttl}` : `set ${key}`;
+
+  // 1. Attempt to write to Primary (if it wasn't the source and exists)
+  if (PRIMARY_REDIS_URL && primaryClient && sourceUrl !== PRIMARY_REDIS_URL) {
+    targetUrls.add(PRIMARY_REDIS_URL);
+    const primaryName = getRedisName(PRIMARY_REDIS_URL);
+    console.log(`[Replication] Ensuring key ${key} on ${primaryName}`);
+    replicationTasks.push(
+      (async () => {
+        try {
+          // Check status, maybe ping if not ready but exists
+          if (primaryClient.status !== 'ready') {
+             await primaryClient.ping().catch(() => {}); // Try a ping, ignore error
+          }
+
+          if (primaryClient.status === 'ready') {
+             if (ttl) {
+               await primaryClient.set(key, value, 'EX', ttl);
+             } else {
+               await primaryClient.set(key, value);
+             }
+             console.log(`[Replication] Successfully synced key ${key} to ${primaryName}`);
+             return { url: PRIMARY_REDIS_URL, status: 'fulfilled' };
+          } else {
+             // Don't throw, just log that primary wasn't ready for sync
+             console.warn(`[Replication] Primary client not ready during sync attempt for key ${key}`);
+             return { url: PRIMARY_REDIS_URL, status: 'skipped', reason: 'not ready' };
+          }
+        } catch (error) {
+          console.error(`[Replication] Failed to sync key ${key} to ${primaryName}:`, error);
+          // Propagate the error status but don't throw to allow other replications
+          return { url: PRIMARY_REDIS_URL, status: 'rejected', error };
         }
-        return true;
-      } catch (error) {
-        console.error(`Replication failed for key ${key}:`, error);
-        return false;
-      }
-    });
-    
-    const results = await Promise.allSettled(replicationPromises);
-    const successful = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
-    
-    console.log(`Successfully replicated to ${successful}/${replicas.length} replicas`);
-  } catch (error) {
-    console.error('Error during replication:', error);
+      })()
+    );
+  } else if (sourceUrl === PRIMARY_REDIS_URL) {
+      // If the source *was* the primary, add it to targets so we don't try replicating back to it
+      targetUrls.add(PRIMARY_REDIS_URL);
+      console.log(`[Replication] Key ${key} was initially written to Primary.`);
+  }
+
+  // 2. Replicate to other available Replicas
+  // Ensure replica clients are potentially initialized
+  await initializeAllClients().catch(err => console.error("Error initializing clients during replication:", err));
+
+  for (const [url, replicaClient] of replicaClients.entries()) {
+    // Replicate if:
+    // - It's not the original source instance
+    // - It hasn't already been targeted (e.g., it's not the primary we just tried)
+    // - It's ready
+    if (url !== sourceUrl && !targetUrls.has(url) && replicaClient.status === 'ready') {
+       targetUrls.add(url); // Mark as targeted for replication
+       const replicaName = getRedisName(url);
+       console.log(`[Replication] Replicating key ${key} to ${replicaName}`);
+       replicationTasks.push(
+         (async () => {
+           try {
+             if (ttl) {
+               await replicaClient.set(key, value, 'EX', ttl);
+             } else {
+               await replicaClient.set(key, value);
+             }
+             console.log(`[Replication] Successfully replicated key ${key} to ${replicaName}`);
+             return { url: url, status: 'fulfilled' };
+           } catch (error) {
+             console.error(`[Replication] Replication failed for key ${key} to ${replicaName}:`, error);
+             return { url: url, status: 'rejected', error };
+           }
+         })()
+       );
+    } else if (url !== sourceUrl && !targetUrls.has(url)) {
+        // Log if a replica was skipped because it wasn't ready
+        console.warn(`[Replication] Skipping replication of key ${key} to ${getRedisName(url)} (not ready or already targeted). Status: ${replicaClient?.status}`);
+    }
+  }
+
+  // Wait for all replication tasks to settle
+  if (replicationTasks.length > 0) {
+     console.log(`[Replication] Waiting for ${replicationTasks.length} tasks for key ${key}...`);
+     const results = await Promise.allSettled(replicationTasks);
+
+     let successfulSync = 0;
+     let failedSync = 0;
+     let skippedSync = 0;
+
+     results.forEach(result => {
+        if (result.status === 'fulfilled') {
+            if (result.value.status === 'fulfilled') successfulSync++;
+            else if (result.value.status === 'rejected') failedSync++;
+            else if (result.value.status === 'skipped') skippedSync++;
+        } else {
+            // Promise itself rejected (unexpected)
+            failedSync++;
+            console.error("[Replication] Unexpected Promise rejection:", result.reason);
+        }
+     });
+
+     console.log(`[Replication] Tasks for key ${key} completed: ${successfulSync} succeeded, ${failedSync} failed, ${skippedSync} skipped.`);
+  } else {
+     console.log(`[Replication] No replication targets found or needed for key ${key} (Source: ${getRedisName(sourceUrl)})`);
   }
 }
 
@@ -464,49 +556,52 @@ export async function storeFeedMapping(
   slugs: string[],
   lang: string
 ): Promise<void> {
-  const mapping = { 
-    slugs, 
-    lang, 
-    created_at: new Date().toISOString() 
+  const mapping = {
+    slugs,
+    lang,
+    created_at: new Date().toISOString()
   };
-  
+
   const stringValue = JSON.stringify(mapping);
-  
+  let keyToStore = feedId;
+  let valueToStore = stringValue;
+  let isCompressed = false;
+
   try {
-    // Get Redis client
-    const redis = await getRedisClient();
-    const activeUrl = redis.options.host || '';
-    
+    // Get Redis client AND its URL
+    const { client: redis, url: activeUrl } = await getRedisClient(); // <-- Destructure result
+
     // Check if compression should be used
     if (shouldCompress(stringValue)) {
       console.log(`Compressing large feed mapping for ${feedId} (${Buffer.byteLength(stringValue, 'utf8')} bytes)`);
       const compressed = await gzip(stringValue);
       const base64Compressed = compressed.toString('base64');
-      
-      // Store with compression flag
-      await redis.set(`${feedId}:compressed`, base64Compressed, "EX", DEFAULT_CACHE_TTL);
-      console.log(`Stored compressed mapping (${base64Compressed.length} bytes)`);
-      
-      // Replicate to other instances
-      const replicas = await getAvailableReplicas(activeUrl);
-      for (const replica of replicas) {
-        await replica.set(`${feedId}:compressed`, base64Compressed, "EX", DEFAULT_CACHE_TTL);
-      }
+
+      keyToStore = `${feedId}:compressed`;
+      valueToStore = base64Compressed;
+      isCompressed = true;
+
+      // Store with compression flag on the active client
+      await redis.set(keyToStore, valueToStore, "EX", DEFAULT_CACHE_TTL);
+      console.log(`Stored compressed mapping (${valueToStore.length} bytes) to ${getRedisName(activeUrl)}`);
+
     } else {
-      // Use standard set operations without compression
-      await redis.set(feedId, stringValue, "EX", DEFAULT_CACHE_TTL);
-      
-      // Replicate to other instances
-      const replicas = await getAvailableReplicas(activeUrl);
-      for (const replica of replicas) {
-        await replica.set(feedId, stringValue, "EX", DEFAULT_CACHE_TTL);
-      }
+      // Use standard set operations without compression on the active client
+      await redis.set(keyToStore, valueToStore, "EX", DEFAULT_CACHE_TTL);
+      console.log(`Stored mapping for feed ${feedId} to ${getRedisName(activeUrl)}`);
     }
-    
-    console.log(`Successfully stored mapping for feed ${feedId}`);
+
+    // Ensure data is on primary and replicate to others
+    // Use the key/value that were actually stored (potentially compressed)
+    await ensurePrimaryAndReplicate(activeUrl, keyToStore, valueToStore, DEFAULT_CACHE_TTL);
+
+    console.log(`Successfully processed storage and replication for feed ${feedId}`);
+
   } catch (error) {
     console.error(`Error storing feed mapping for ${feedId}:`, error);
-    throw error;
+    // Consider if the error happened during initial write or replication
+    // If initial write failed, ensurePrimaryAndReplicate wouldn't have run
+    throw error; // Re-throw the error after logging
   }
 }
 
@@ -518,11 +613,11 @@ export async function getFeedMapping(
 ): Promise<FeedMapping | null> {
   try {
     // Try primary first
-    const redis = await getRedisClient();
+    const { client, url } = await getRedisClient();
     
     // Check for compressed version first
     const compressedKey = `${feedId}:compressed`;
-    const compressedData = await redis.get(compressedKey);
+    const compressedData = await client.get(compressedKey);
     
     if (compressedData) {
       console.log(`Found compressed data for ${feedId}`);
@@ -533,7 +628,7 @@ export async function getFeedMapping(
         const data = JSON.parse(decompressed.toString());
         
         // Reset expiration
-        await redis.expire(compressedKey, DEFAULT_CACHE_TTL);
+        await client.expire(compressedKey, DEFAULT_CACHE_TTL);
         
         return {
           slugs: data.slugs,
@@ -546,10 +641,10 @@ export async function getFeedMapping(
     }
     
     // If no compressed version, try regular key
-    let jsonString = await redis.get(feedId);
+    let jsonString = await client.get(feedId);
     
     // If not found in primary but we have replicas, check them
-    if (!jsonString && REPLICA_URLS.length > 0 && redis === primaryClient) {
+    if (!jsonString && REPLICA_URLS.length > 0 && client === primaryClient) {
       console.log(`Key ${feedId} not found in primary, checking replicas...`);
       
       // Try each replica
@@ -578,7 +673,7 @@ export async function getFeedMapping(
     if (!jsonString) return null;
     
     // Reset expiration on access
-    await redis.expire(feedId, DEFAULT_CACHE_TTL);
+    await client.expire(feedId, DEFAULT_CACHE_TTL);
     
     // Parse the result
     const data = JSON.parse(jsonString as string);
@@ -603,7 +698,7 @@ export async function warmChapterCache(
 ): Promise<void> {
   try {
     console.log(`Warming chapter cache for ${slugs.length} comics in ${lang}`);
-    const redis = await getRedisClient(); // This already handles failover
+    const { client } = await getRedisClient(); // This already handles failover
     
     // Validate slugs
     const validSlugs = slugs.filter(slug => 
@@ -614,7 +709,7 @@ export async function warmChapterCache(
     }
     
     // Check which slugs are already in cache
-    const pipeline = redis.pipeline();
+    const pipeline = client.pipeline();
     const cacheKeys = validSlugs.map(slug => `chapters:${slug}:${lang}`);
     
     cacheKeys.forEach(key => {
@@ -663,40 +758,56 @@ export async function storeLargeFeedMapping(
   slugs: string[],
   lang: string
 ): Promise<void> {
-  const mapping = { 
-    slugs, 
-    lang, 
-    created_at: new Date().toISOString() 
+   // This function now essentially calls storeFeedMapping which handles compression logic.
+   // We can simplify this or keep it as a specific entry point.
+   // For consistency, let's just call the main function.
+   console.log(`Using storeLargeFeedMapping for ${feedId}, deferring to storeFeedMapping.`);
+   await storeFeedMapping(feedId, slugs, lang);
+
+  /* // Original logic updated with ensurePrimaryAndReplicate:
+  const mapping = {
+    slugs,
+    lang,
+    created_at: new Date().toISOString()
   };
-  
+
   const jsonString = JSON.stringify(mapping);
-  
+  let keyToStore = feedId;
+  let valueToStore = jsonString;
+  let ttl = DEFAULT_CACHE_TTL;
+
   try {
     const redis = await getRedisClient();
-    const activeUrl = redis.options.host || '';
-    
+    const activeUrl = redis.options.url || `${redis.options.host}:${redis.options.port}`;
+
     // Use compression for large mappings
     if (shouldCompress(jsonString)) {
       const compressed = await gzip(jsonString);
       const base64Compressed = compressed.toString('base64');
-      
+
+      keyToStore = `${feedId}:compressed`;
+      valueToStore = base64Compressed;
+
       // Store with compression flag
-      await redis.set(`${feedId}:compressed`, base64Compressed, "EX", DEFAULT_CACHE_TTL);
-      
-      // Replicate to other instances
-      await replicateOperation(activeUrl, `${feedId}:compressed`, base64Compressed, DEFAULT_CACHE_TTL);
-      
-      console.log(`Successfully stored compressed mapping for feed ${feedId} (${jsonString.length} → ${base64Compressed.length} bytes)`);
+      await redis.set(keyToStore, valueToStore, "EX", ttl);
+      console.log(`Stored compressed mapping for feed ${feedId} to ${getRedisName(activeUrl)} (${jsonString.length} → ${valueToStore.length} bytes)`);
+
     } else {
       // Use normal storage for small mappings
-      await redis.set(feedId, jsonString, "EX", DEFAULT_CACHE_TTL);
-      await replicateOperation(activeUrl, feedId, jsonString, DEFAULT_CACHE_TTL);
-      console.log(`Successfully stored mapping for feed ${feedId}`);
+      await redis.set(keyToStore, jsonString, "EX", ttl);
+      console.log(`Stored mapping for feed ${feedId} to ${getRedisName(activeUrl)}`);
     }
+
+    // Ensure data is on primary and replicate to others
+    await ensurePrimaryAndReplicate(activeUrl, keyToStore, valueToStore, ttl);
+
+    console.log(`Successfully processed storage and replication for large feed ${feedId}`);
+
   } catch (error) {
-    console.error(`Error storing feed mapping for ${feedId}:`, error);
+    console.error(`Error storing large feed mapping for ${feedId}:`, error);
     throw error;
   }
+  */
 }
 
 // Batch get multiple feed mappings at once
@@ -706,8 +817,8 @@ export async function getBatchFeedMappings(
   if (!feedIds.length) return {};
   
   try {
-    const redis = await getRedisClient();
-    const pipeline = redis.pipeline();
+    const { client } = await getRedisClient();
+    const pipeline = client.pipeline();
     
     // Check regular keys first
     feedIds.forEach(id => {
@@ -719,8 +830,8 @@ export async function getBatchFeedMappings(
     
     // Process results
     const mappings: Record<string, FeedMapping | null> = {};
-    const ttlUpdates = redis.pipeline();
-    const compressedChecks = redis.pipeline();
+    const ttlUpdates = client.pipeline();
+    const compressedChecks = client.pipeline();
     const compressedIds: string[] = [];
     
     for (let i = 0; i < feedIds.length; i++) {
@@ -761,7 +872,7 @@ export async function getBatchFeedMappings(
       const compressedResults = await compressedChecks.exec();
       
       if (compressedResults) {
-        const compressedFetches = redis.pipeline();
+        const compressedFetches = client.pipeline();
         const compressedToFetch: string[] = [];
         
         compressedResults.forEach((result, index) => {
@@ -792,7 +903,7 @@ export async function getBatchFeedMappings(
                   };
                   
                   // Reset TTL in background
-                  redis.expire(`${id}:compressed`, DEFAULT_CACHE_TTL).catch(() => {});
+                  client.expire(`${id}:compressed`, DEFAULT_CACHE_TTL).catch(() => {});
                 } catch (e) {
                   mappings[id] = null;
                 }
