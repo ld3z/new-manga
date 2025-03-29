@@ -7,13 +7,28 @@ interface Props {
 
 const { announcement } = Astro.props;
 
-const bgColorClass = {
-  info: 'bg-[rgb(var(--accent))] text-[rgb(var(--accent-text))]',
-  warning: 'bg-yellow-500 text-white',
-  success: 'bg-emerald-500 text-white'
-}[announcement.type];
+// Define colors based on announcement type
+const typeStyles = {
+  info: {
+    bgColor: 'bg-[rgb(var(--accent))]',
+    textColor: 'text-[rgb(var(--accent-text))]',
+    icon: 'info-icon'
+  },
+  warning: {
+    bgColor: 'bg-yellow-500',
+    textColor: 'text-white',
+    icon: 'warning-icon'
+  },
+  success: {
+    bgColor: 'bg-emerald-500',
+    textColor: 'text-white',
+    icon: 'success-icon'
+  }
+};
 
-// Create a simple hash of the announcement content
+const { bgColor, textColor, icon } = typeStyles[announcement.type];
+
+// Create a simple hash of the announcement content for localStorage key
 const announcementHash = btoa(JSON.stringify({
   message: announcement.message,
   type: announcement.type,
@@ -21,44 +36,79 @@ const announcementHash = btoa(JSON.stringify({
 }));
 ---
 
-<div class={`announcement-banner hidden w-full ${bgColorClass} px-6 py-4 shadow-lg`}>
+<div 
+  class={`announcement-banner hidden w-full ${bgColor} ${textColor} px-6 py-4 shadow-lg`}
+  role="alert"
+  aria-live="polite"
+>
   <div class="container mx-auto flex items-center justify-between">
     <div class="flex items-center gap-3 text-lg">
+      {/* Info Icon */}
       {announcement.type === 'info' && (
-        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-      )}
-      {announcement.type === 'warning' && (
-        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-        </svg>
-      )}
-      {announcement.type === 'success' && (
-        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+        <svg class="w-6 h-6 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path 
+            stroke-linecap="round" 
+            stroke-linejoin="round" 
+            stroke-width="2" 
+            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" 
+          />
         </svg>
       )}
       
+      {/* Warning Icon */}
+      {announcement.type === 'warning' && (
+        <svg class="w-6 h-6 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path 
+            stroke-linecap="round" 
+            stroke-linejoin="round" 
+            stroke-width="2" 
+            d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" 
+          />
+        </svg>
+      )}
+      
+      {/* Success Icon */}
+      {announcement.type === 'success' && (
+        <svg class="w-6 h-6 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path 
+            stroke-linecap="round" 
+            stroke-linejoin="round" 
+            stroke-width="2" 
+            d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" 
+          />
+        </svg>
+      )}
+      
+      {/* Message */}
       <span class="font-medium">{announcement.message}</span>
       
+      {/* Link if provided */}
       {announcement.link && (
         <a 
           href={announcement.link.url}
           class="underline hover:opacity-80 transition-opacity font-semibold ml-2"
+          target="_blank"
+          rel="noopener noreferrer"
         >
           {announcement.link.text} →
         </a>
       )}
     </div>
     
+    {/* Dismiss button if announcement is dismissible */}
     {announcement.dismissible && (
       <button 
         class="dismiss-announcement p-2 hover:bg-black/10 rounded-full transition-colors"
         aria-label="Dismiss announcement"
+        title="Dismiss"
       >
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+          <path 
+            stroke-linecap="round" 
+            stroke-linejoin="round" 
+            stroke-width="2" 
+            d="M6 18L18 6M6 6l12 12" 
+          />
         </svg>
       </button>
     )}
@@ -66,11 +116,14 @@ const announcementHash = btoa(JSON.stringify({
 </div>
 
 <script define:vars={{ dismissible: announcement.dismissible, announcementHash }}>
+  // DOM elements
   const banner = document.querySelector('.announcement-banner');
   const dismissBtn = document.querySelector('.dismiss-announcement');
   const storageKey = `announcement-dismissed-${announcementHash}`;
   
-  // Check if announcement should be shown
+  /**
+   * Check if the announcement should be shown based on localStorage
+   */
   function checkVisibility() {
     // Only check localStorage if the banner is dismissible
     const isDismissed = dismissible ? 
@@ -82,20 +135,22 @@ const announcementHash = btoa(JSON.stringify({
     }
   }
 
-  // Run after DOM is loaded
+  // Run after DOM is loaded to prevent flash of hidden content
   document.addEventListener('DOMContentLoaded', checkVisibility);
   
-  dismissBtn?.addEventListener('click', () => {
-    if (dismissible) {
+  // Add click handler for dismiss button if present
+  if (dismissBtn && dismissible) {
+    dismissBtn.addEventListener('click', () => {
       banner?.classList.add('hidden');
       localStorage.setItem(storageKey, 'true');
-    }
-  });
+    });
+  }
 </script>
 
 <style>
   .announcement-banner {
     animation: slideDown 0.5s ease-out;
+    z-index: 50;
   }
 
   @keyframes slideDown {

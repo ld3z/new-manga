@@ -1,25 +1,17 @@
 ---
-import { getFeedMapping } from '../lib/db';
+import { getFeedMapping } from "../lib/db";
 interface Props {
   currentSlugs?: string[];
 }
 
 const { currentSlugs = [] } = Astro.props;
 
-import { availableLanguages, languageMap } from '../lib/api';
+import { availableLanguages, languageMap } from "../lib/api";
 
-const languages = [
-  { value: 'en', label: 'English' },
-  { value: 'ja', label: 'Japanese' },
-  { value: 'ko', label: 'Korean' },
-  { value: 'zh', label: 'Chinese' },
-  { value: 'fr', label: 'French' },
-  { value: 'es', label: 'Spanish' },
-  { value: 'it', label: 'Italian' },
-  { value: 'de', label: 'German' },
-  { value: 'tr', label: 'Turkish' },
-  { value: 'pl', label: 'Polish' },
-];
+const languages = Object.entries(languageMap).map(([value, label]) => ({
+  value,
+  label,
+}));
 ---
 
 <div class="space-y-4 sm:space-y-6">
@@ -37,9 +29,11 @@ const languages = [
         id="lang-select"
         class="px-3 sm:px-4 py-2 bg-primary rounded-lg border border-hover/30 focus:outline-none focus:border-accent/50 transition-colors text-sm sm:text-base"
       >
-        {languages.map(lang => (
-          <option value={lang.value}>{lang.label}</option>
-        ))}
+        {
+          languages.map((lang) => (
+            <option value={lang.value}>{lang.label}</option>
+          ))
+        }
       </select>
     </div>
 
@@ -54,8 +48,16 @@ const languages = [
         id="import-feed"
         class="px-4 py-2 bg-secondary hover:bg-hover transition-colors rounded-lg text-sm sm:text-base flex items-center gap-2"
       >
-        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+        <svg
+          class="w-4 h-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path
+            d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"
+          ></path>
         </svg>
         Import Feed
       </button>
@@ -73,27 +75,46 @@ const languages = [
       class="px-3 py-1.5 text-sm text-red-500 hover:text-red-600 hover:bg-red-500/10 rounded-lg transition-colors flex items-center gap-2"
       style="display: none;"
     >
-      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+      <svg
+        class="w-4 h-4"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+      >
+        <path
+          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+        ></path>
       </svg>
       Clear All
     </button>
   </div>
 
   <div id="slug-list" class="space-y-2">
-    {currentSlugs.map(slug => (
-      <div class="flex items-center justify-between p-3 bg-primary rounded-lg border border-hover/30" data-slug={slug}>
-        <span class="text-primary truncate pr-2">{slug}</span>
-        <button 
-          class="text-red-500 hover:text-red-600 transition-colors flex-shrink-0 pl-2"
-          data-remove={slug}
+    {
+      currentSlugs.map((slug) => (
+        <div
+          class="flex items-center justify-between p-3 bg-primary rounded-lg border border-hover/30"
+          data-slug={slug}
         >
-          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M6 18L18 6M6 6l12 12"></path>
-          </svg>
-        </button>
-      </div>
-    ))}
+          <span class="text-primary truncate pr-2">{slug}</span>
+          <button
+            class="text-red-500 hover:text-red-600 transition-colors flex-shrink-0 pl-2"
+            data-remove={slug}
+          >
+            <svg
+              class="w-5 h-5"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      ))
+    }
   </div>
 
   <div class="flex justify-center">
@@ -123,20 +144,26 @@ const languages = [
 </div>
 
 <script>
-  const searchInput = document.getElementById('search-input') as HTMLInputElement;
-  const searchResults = document.getElementById('search-results');
-  const slugList = document.getElementById('slug-list');
-  const generateRSSLink = document.getElementById('generate-rss');
-  const langSelect = document.getElementById('lang-select') as HTMLSelectElement;
-  const feedIdInput = document.getElementById('feed-id-input') as HTMLInputElement;
-  const importFeedButton = document.getElementById('import-feed');
-  const clearAllButton = document.getElementById('clear-all');
+  const searchInput = document.getElementById(
+    "search-input"
+  ) as HTMLInputElement;
+  const searchResults = document.getElementById("search-results");
+  const slugList = document.getElementById("slug-list");
+  const generateRSSLink = document.getElementById("generate-rss");
+  const langSelect = document.getElementById(
+    "lang-select"
+  ) as HTMLSelectElement;
+  const feedIdInput = document.getElementById(
+    "feed-id-input"
+  ) as HTMLInputElement;
+  const importFeedButton = document.getElementById("import-feed");
+  const clearAllButton = document.getElementById("clear-all");
 
   // Load saved slugs from localStorage
-  let slugs = new Set(JSON.parse(localStorage.getItem('comic-slugs') || '[]'));
-  
+  let slugs = new Set(JSON.parse(localStorage.getItem("comic-slugs") || "[]"));
+
   function updateSlugs() {
-    localStorage.setItem('comic-slugs', JSON.stringify([...slugs]));
+    localStorage.setItem("comic-slugs", JSON.stringify([...slugs]));
     updateRSSLink();
     renderSlugs();
     updateClearAllButton();
@@ -144,13 +171,17 @@ const languages = [
 
   function updateClearAllButton() {
     if (clearAllButton) {
-      clearAllButton.style.display = slugs.size > 0 ? 'flex' : 'none';
+      clearAllButton.style.display = slugs.size > 0 ? "flex" : "none";
     }
   }
 
   // Clear all functionality
-  clearAllButton?.addEventListener('click', () => {
-    if (confirm('Are you sure you want to clear all comics? This cannot be undone.')) {
+  clearAllButton?.addEventListener("click", () => {
+    if (
+      confirm(
+        "Are you sure you want to clear all comics? This cannot be undone."
+      )
+    ) {
       slugs.clear();
       updateSlugs();
     }
@@ -158,11 +189,13 @@ const languages = [
 
   async function renderSlugs() {
     if (!slugList) return;
-    
+
     // Show loading state
     slugList.innerHTML = `
       <div class="animate-pulse space-y-2">
-        ${[...slugs].map(() => `
+        ${[...slugs]
+          .map(
+            () => `
           <div class="flex items-center gap-4 p-3 bg-primary rounded-lg border border-hover/30">
             <div class="w-12 h-16 bg-hover/30 rounded"></div>
             <div class="flex-1">
@@ -170,7 +203,9 @@ const languages = [
               <div class="h-4 bg-hover/30 rounded w-1/2"></div>
             </div>
           </div>
-        `).join('')}
+        `
+          )
+          .join("")}
       </div>
     `;
 
@@ -179,64 +214,73 @@ const languages = [
         // Add timeout for comic info fetch
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
-        
+
         const response = await fetch(`/api/comic/${encodeURIComponent(slug)}`, {
-          signal: controller.signal
+          signal: controller.signal,
         });
         clearTimeout(timeoutId);
-        
-        if (!response.ok) throw new Error('Comic not found');
-        
+
+        if (!response.ok) throw new Error("Comic not found");
+
         const data = await response.json();
-        
-        const div = document.createElement('div');
-        div.className = 'flex items-center gap-4 p-4 bg-primary rounded-lg border border-hover/30 hover:border-accent/50 transition-all duration-300 group relative overflow-hidden';
-        
+
+        const div = document.createElement("div");
+        div.className =
+          "flex items-center gap-4 p-4 bg-primary rounded-lg border border-hover/30 hover:border-accent/50 transition-all duration-300 group relative overflow-hidden";
+
         // Add a link to the comic
-        const link = document.createElement('a');
+        const link = document.createElement("a");
         link.href = `https://comick.io/comic/${slug}`;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        link.className = 'flex items-center gap-4 flex-1 min-w-0';
-        
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.className = "flex items-center gap-4 flex-1 min-w-0";
+
         // Handle cover image
         if (data.comic?.md_covers?.[0]?.b2key) {
-          const img = document.createElement('img');
+          const img = document.createElement("img");
           img.src = `https://meo.comick.pictures/${data.comic.md_covers[0].b2key}`;
-          img.className = 'w-16 h-24 object-cover rounded shadow-md group-hover:scale-105 transition-transform duration-300';
+          img.className =
+            "w-16 h-24 object-cover rounded shadow-md group-hover:scale-105 transition-transform duration-300";
           img.alt = data.comic.title || slug;
           img.onerror = () => {
-            img.src = '/placeholder.png'; // Fallback image
+            img.src = "/placeholder.png"; // Fallback image
             img.onerror = null;
           };
           link.appendChild(img);
         } else {
           // Placeholder if no image
-          const placeholder = document.createElement('div');
-          placeholder.className = 'w-16 h-24 bg-hover/30 rounded flex items-center justify-center text-primary/30';
-          placeholder.innerHTML = '<svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>';
+          const placeholder = document.createElement("div");
+          placeholder.className =
+            "w-16 h-24 bg-hover/30 rounded flex items-center justify-center text-primary/30";
+          placeholder.innerHTML =
+            '<svg class="w-8 h-8" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>';
           link.appendChild(placeholder);
         }
-        
-        const info = document.createElement('div');
-        info.className = 'flex-1 min-w-0 truncate';
+
+        const info = document.createElement("div");
+        info.className = "flex-1 min-w-0 truncate";
         info.innerHTML = `
           <div class="font-medium text-lg truncate group-hover:text-accent transition-colors">
             ${data.comic?.title || slug}
           </div>
           <div class="text-sm text-primary/60 truncate">${slug}</div>
-          ${data.comic?.last_chapter ? `
+          ${
+            data.comic?.last_chapter
+              ? `
             <div class="text-xs text-accent mt-1">
               Latest: Chapter ${data.comic.last_chapter}
             </div>
-          ` : ''}
+          `
+              : ""
+          }
         `;
-        
+
         link.appendChild(info);
         div.appendChild(link);
-        
-        const removeBtn = document.createElement('button');
-        removeBtn.className = 'text-red-500 hover:text-red-600 transition-colors p-2 hover:bg-red-500/10 rounded-full flex-shrink-0';
+
+        const removeBtn = document.createElement("button");
+        removeBtn.className =
+          "text-red-500 hover:text-red-600 transition-colors p-2 hover:bg-red-500/10 rounded-full flex-shrink-0";
         removeBtn.innerHTML = `
           <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M6 18L18 6M6 6l12 12"></path>
@@ -245,20 +289,21 @@ const languages = [
         removeBtn.onclick = (e) => {
           e.preventDefault();
           e.stopPropagation();
-          div.classList.add('scale-95', 'opacity-0');
+          div.classList.add("scale-95", "opacity-0");
           setTimeout(() => {
             slugs.delete(slug);
             updateSlugs();
           }, 200);
         };
-        
+
         div.appendChild(removeBtn);
         return div;
       } catch (error) {
         console.error(`Failed to fetch comic info for ${slug}:`, error);
         // Improved error state
-        const div = document.createElement('div');
-        div.className = 'flex items-center justify-between p-4 bg-primary rounded-lg border border-red-500/30 group';
+        const div = document.createElement("div");
+        div.className =
+          "flex items-center justify-between p-4 bg-primary rounded-lg border border-red-500/30 group";
         div.innerHTML = `
           <div class="flex items-center gap-4 flex-1">
             <div class="w-16 h-24 bg-red-500/10 rounded flex items-center justify-center text-red-500/50">
@@ -279,13 +324,13 @@ const languages = [
             </svg>
           </button>
         `;
-        
-        const removeButton = div.querySelector('button');
+
+        const removeButton = div.querySelector("button");
         if (removeButton) {
           removeButton.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
-            div.classList.add('scale-95', 'opacity-0');
+            div.classList.add("scale-95", "opacity-0");
             setTimeout(() => {
               slugs.delete(slug);
               updateSlugs();
@@ -295,22 +340,24 @@ const languages = [
         return div;
       }
     });
-    
-    Promise.all(promises).then(elements => {
-      slugList.innerHTML = '';
-      elements.forEach(element => slugList.appendChild(element));
-    }).catch(error => {
-      console.error('Failed to render slugs:', error);
-    });
+
+    Promise.all(promises)
+      .then((elements) => {
+        slugList.innerHTML = "";
+        elements.forEach((element) => slugList.appendChild(element));
+      })
+      .catch((error) => {
+        console.error("Failed to render slugs:", error);
+      });
   }
 
   let searchTimeout: NodeJS.Timeout;
-  searchInput?.addEventListener('input', () => {
+  searchInput?.addEventListener("input", () => {
     clearTimeout(searchTimeout);
     searchTimeout = setTimeout(async () => {
       const query = searchInput.value.trim();
       if (query.length < 2) {
-        searchResults!.classList.add('hidden');
+        searchResults!.classList.add("hidden");
         return;
       }
 
@@ -320,22 +367,22 @@ const languages = [
             Searching...
           </div>
         `;
-        searchResults!.classList.remove('hidden');
+        searchResults!.classList.remove("hidden");
 
-        const response = await fetch('/api/search', {
-          method: 'POST',
+        const response = await fetch("/api/search", {
+          method: "POST",
           headers: {
-            'Content-Type': 'application/json',
+            "Content-Type": "application/json",
           },
-          body: JSON.stringify({ query })
+          body: JSON.stringify({ query }),
         });
-        
+
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
-        
+
         const data = await response.json();
-        
+
         if (!data || !Array.isArray(data) || data.length === 0) {
           searchResults!.innerHTML = `
             <div class="p-3 bg-primary rounded-lg border border-hover/30">
@@ -344,38 +391,39 @@ const languages = [
           `;
           return;
         }
-        
-        searchResults!.innerHTML = '';
-        
+
+        searchResults!.innerHTML = "";
+
         data.forEach((comic: any) => {
-          const div = document.createElement('div');
-          div.className = 'flex items-center gap-3 p-3 bg-primary rounded-lg border border-hover/30 cursor-pointer hover:border-accent/50 transition-colors';
+          const div = document.createElement("div");
+          div.className =
+            "flex items-center gap-3 p-3 bg-primary rounded-lg border border-hover/30 cursor-pointer hover:border-accent/50 transition-colors";
           div.onclick = () => {
             slugs.add(comic.slug);
             updateSlugs();
-            searchInput.value = '';
-            searchResults!.classList.add('hidden');
+            searchInput.value = "";
+            searchResults!.classList.add("hidden");
           };
-          
+
           if (comic.md_covers && comic.md_covers[0]) {
-            const img = document.createElement('img');
+            const img = document.createElement("img");
             img.src = `https://meo.comick.pictures/${comic.md_covers[0].b2key}`;
-            img.className = 'w-12 h-16 object-cover rounded';
+            img.className = "w-12 h-16 object-cover rounded";
             img.alt = comic.title;
             div.appendChild(img);
           }
-          
-          const info = document.createElement('div');
+
+          const info = document.createElement("div");
           info.innerHTML = `
             <div class="font-medium">${comic.title}</div>
             <div class="text-sm text-primary/60">${comic.slug}</div>
           `;
           div.appendChild(info);
-          
+
           searchResults!.appendChild(div);
         });
       } catch (error) {
-        console.error('Failed to search comics:', error);
+        console.error("Failed to search comics:", error);
         searchResults!.innerHTML = `
           <div class="p-3 bg-primary rounded-lg border border-red-500/30 text-red-500">
             Failed to search comics. Please try again.
@@ -386,9 +434,9 @@ const languages = [
   });
 
   async function updateRSSLink() {
-    const slugString = [...slugs].join(',');
-    const lang = langSelect?.value || 'en';
-    
+    const slugString = [...slugs].join(",");
+    const lang = langSelect?.value || "en";
+
     if (slugString) {
       try {
         // Add loading state
@@ -402,22 +450,22 @@ const languages = [
         `;
         generateRSSLink!.onclick = null;
 
-        const response = await fetch('/api/create-feed', {
-          method: 'POST',
+        const response = await fetch("/api/create-feed", {
+          method: "POST",
           headers: {
-            'Content-Type': 'application/json',
+            "Content-Type": "application/json",
           },
           body: JSON.stringify({
             slugs: [...slugs],
-            lang
-          })
+            lang,
+          }),
         });
-        
-        if (!response.ok) throw new Error('Failed to create feed');
-        
+
+        if (!response.ok) throw new Error("Failed to create feed");
+
         const { feedId } = await response.json();
         generateRSSLink!.href = `/rss/${feedId}.xml`;
-        
+
         // Clear loading state after successful generation
         generateRSSLink!.innerHTML = `
           <span class="flex items-center gap-2">
@@ -431,7 +479,7 @@ const languages = [
         `;
         generateRSSLink!.onclick = null; // Remove any existing click handlers
       } catch (error) {
-        console.error('Failed to generate feed:', error);
+        console.error("Failed to generate feed:", error);
         generateRSSLink!.innerHTML = `
           <span class="flex items-center gap-2">
             <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -443,7 +491,7 @@ const languages = [
       }
     } else {
       // Reset to default state when no slugs
-      generateRSSLink!.href = '#';
+      generateRSSLink!.href = "#";
       generateRSSLink!.innerHTML = `
         <span class="flex items-center gap-2">
           <svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -462,7 +510,7 @@ const languages = [
   }
 
   // Import feed functionality
-  importFeedButton?.addEventListener('click', async () => {
+  importFeedButton?.addEventListener("click", async () => {
     const feedId = feedIdInput.value.trim();
     if (!feedId) return;
 
@@ -478,48 +526,58 @@ const languages = [
       const response = await fetch(`/api/feed/${feedId}`);
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`Feed import failed with status ${response.status}: ${errorText}`);
-        
+        console.error(
+          `Feed import failed with status ${response.status}: ${errorText}`
+        );
+
         // Display a more user-friendly error based on the status code
-        let userFriendlyError = 'Failed to import feed.';
-        
+        let userFriendlyError = "Failed to import feed.";
+
         if (response.status === 404) {
           userFriendlyError = `Feed ID "${feedId}" not found. Please check the ID and try again.`;
         } else if (response.status === 500) {
-          if (errorText.includes('ETIMEDOUT') || errorText.includes('timeout')) {
-            userFriendlyError = 'Connection to database timed out. This is common on the first request. Please try again in a few seconds.';
-          } else if (errorText.includes('ECONNREFUSED')) {
-            userFriendlyError = 'Database connection refused. Please try again later.';
+          if (
+            errorText.includes("ETIMEDOUT") ||
+            errorText.includes("timeout")
+          ) {
+            userFriendlyError =
+              "Connection to database timed out. This is common on the first request. Please try again in a few seconds.";
+          } else if (errorText.includes("ECONNREFUSED")) {
+            userFriendlyError =
+              "Database connection refused. Please try again later.";
           } else {
-            userFriendlyError = 'Server error while importing feed. Please try again later.';
+            userFriendlyError =
+              "Server error while importing feed. Please try again later.";
           }
         }
-        
+
         throw new Error(userFriendlyError);
       }
-      
+
       const data = await response.json();
-      console.log('Feed import data:', data); // Diagnostic log
+      console.log("Feed import data:", data); // Diagnostic log
 
       // Validate response structure
-      if (!data || typeof data !== 'object') {
-        throw new Error('Invalid feed data format: not an object');
+      if (!data || typeof data !== "object") {
+        throw new Error("Invalid feed data format: not an object");
       }
-      
+
       const feedSlugs = data.slugs;
       const lang = data.lang;
-      
+
       // Validate slugs array
       if (!feedSlugs || !Array.isArray(feedSlugs)) {
-        throw new Error('Invalid feed data: missing or invalid slugs array');
+        throw new Error("Invalid feed data: missing or invalid slugs array");
       }
 
       // Validate language
-      if (!lang || typeof lang !== 'string') {
-        console.warn('Feed has missing or invalid language, using default');
+      if (!lang || typeof lang !== "string") {
+        console.warn("Feed has missing or invalid language, using default");
       } else if (langSelect) {
         // Only update language if it's valid
-        const validLanguages = Array.from(langSelect.options).map(opt => opt.value);
+        const validLanguages = Array.from(langSelect.options).map(
+          (opt) => opt.value
+        );
         if (validLanguages.includes(lang)) {
           langSelect.value = lang;
         } else {
@@ -530,32 +588,32 @@ const languages = [
       // Add new slugs to existing collection
       let importCount = 0;
       feedSlugs.forEach((slug: string) => {
-        if (typeof slug === 'string' && slug.trim()) {
+        if (typeof slug === "string" && slug.trim()) {
           slugs.add(slug.trim());
           importCount++;
         } else {
-          console.warn('Skipping invalid slug in feed:', slug);
+          console.warn("Skipping invalid slug in feed:", slug);
         }
       });
-      
+
       // Update UI
       updateSlugs();
-      feedIdInput.value = '';
+      feedIdInput.value = "";
 
       // Show success message
-      const successDiv = document.createElement('div');
-      successDiv.className = 'text-sm text-green-500 mt-1';
+      const successDiv = document.createElement("div");
+      successDiv.className = "text-sm text-green-500 mt-1";
       successDiv.textContent = `Feed imported successfully! Added ${importCount} comics.`;
       feedIdInput.parentNode?.appendChild(successDiv);
       setTimeout(() => successDiv.remove(), 3000);
-
     } catch (error) {
-      console.error('Failed to import feed:', error);
-      const errorDiv = document.createElement('div');
-      errorDiv.className = 'text-sm text-red-500 mt-1';
-      errorDiv.textContent = error instanceof Error 
-        ? `Import failed: ${error.message}` 
-        : 'Failed to import feed. Please check the feed ID and try again.';
+      console.error("Failed to import feed:", error);
+      const errorDiv = document.createElement("div");
+      errorDiv.className = "text-sm text-red-500 mt-1";
+      errorDiv.textContent =
+        error instanceof Error
+          ? `Import failed: ${error.message}`
+          : "Failed to import feed. Please check the feed ID and try again.";
       feedIdInput.parentNode?.appendChild(errorDiv);
       setTimeout(() => errorDiv.remove(), 5000);
     } finally {
@@ -575,12 +633,15 @@ const languages = [
   updateClearAllButton();
 
   // Update RSS link when language changes
-  langSelect?.addEventListener('change', () => updateRSSLink());
+  langSelect?.addEventListener("change", () => updateRSSLink());
 
   // Close search results when clicking outside
-  document.addEventListener('click', (e) => {
-    if (!searchResults?.contains(e.target as Node) && !searchInput?.contains(e.target as Node)) {
-      searchResults?.classList.add('hidden');
+  document.addEventListener("click", (e) => {
+    if (
+      !searchResults?.contains(e.target as Node) &&
+      !searchInput?.contains(e.target as Node)
+    ) {
+      searchResults?.classList.add("hidden");
     }
   });
 </script>

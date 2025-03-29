@@ -1,10 +1,12 @@
-import type { Comic, Genre, ComicType } from './types';
-import { getRedisClient } from './db';
+import type { Comic, Genre, ComicType, ChapterDetail } from './types';
+import { getRedisClient, CHAPTER_CACHE_TTL } from './db';
+import pThrottle from 'p-throttle';
 
 const languageMap = {
   "en": "English",
   "fr": "French",
   "es": "Spanish",
+  "es-419": "Spanish (Latin America)",
   "it": "Italian",
   "pl": "Polish",
   "tr": "Turkish",
@@ -13,7 +15,10 @@ const languageMap = {
   "sv": "Swedish",
   "ar": "Arabic",
   "de": "German",
-  "ko": "Korean"
+  "ko": "Korean",
+  "pt": "Portuguese",
+  "pt-br": "Portuguese (Brazil)",
+  "pt-pt": "Portuguese (Portugal)"
 } as const;
 
 const languages = new Set(Object.keys(languageMap));
@@ -26,6 +31,20 @@ let genreCache: Genre[] = [];
 const RETRY_COUNT = 3;
 const RETRY_DELAY = 1000;
 
+// Rate limiting configuration - adjust these values if needed
+const API_REQUESTS_PER_SECOND = 10;  // Maximum requests per second
+const API_CONCURRENT_REQUESTS = 6;   // Maximum concurrent requests
+const DELAY_AFTER_429 = 1000;        // Wait 1 second after a rate limit hit
+
+// Create throttled fetch function to avoid rate limits
+const throttledFetch = pThrottle({
+  limit: API_REQUESTS_PER_SECOND,
+  interval: 1000,
+  concurrency: API_CONCURRENT_REQUESTS
+} as any)((url: string, options: RequestInit = {}, retries = RETRY_COUNT) => {
+  return fetchWithRetry(url, options, retries);
+});
+
 async function fetchWithRetry(url: string, options: RequestInit = {}, retries = RETRY_COUNT): Promise<Response> {
   try {
     const response = await fetch(url, {
@@ -37,6 +56,19 @@ async function fetchWithRetry(url: string, options: RequestInit = {}, retries = 
       },
     });
 
+    // Special handling for rate limit errors
+    if (response.status === 429) {
+      console.warn(`Rate limited on ${url}. Waiting ${DELAY_AFTER_429}ms before retry.`);
+      
+      // Wait for the specified delay
+      await new Promise(resolve => setTimeout(resolve, DELAY_AFTER_429));
+      
+      // Retry with one less retry count but only if we have retries left
+      if (retries > 0) {
+        return fetchWithRetry(url, options, retries - 1);
+      }
+    }
+
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -44,7 +76,10 @@ async function fetchWithRetry(url: string, options: RequestInit = {}, retries = 
     return response;
   } catch (error) {
     if (retries > 0) {
-      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+      // For non-429 errors, use exponential backoff
+      const delay = Math.min(RETRY_DELAY * Math.pow(2, RETRY_COUNT - retries), 10000);
+      console.log(`Retrying after ${delay}ms. Retries left: ${retries-1}`);
+      await new Promise(resolve => setTimeout(resolve, delay));
       return fetchWithRetry(url, options, retries - 1);
     }
     throw error;
@@ -55,7 +90,8 @@ export async function fetchGenres(): Promise<Genre[]> {
   if (genreCache.length > 0) return genreCache;
 
   try {
-    const response = await fetchWithRetry('https://api.comick.fun/genre');
+    // No tachiyomi param for genre endpoint
+    const response = await throttledFetch('https://api.comick.fun/genre');
     genreCache = await response.json();
     return genreCache;
   } catch (error) {
@@ -92,7 +128,7 @@ export async function fetchComics(
   try {
     console.log('Fetching comics from:', apiUrl);
     
-    const response = await fetchWithRetry(apiUrl);
+    const response = await throttledFetch(apiUrl);
     const data = await response.json();
 
     if (!Array.isArray(data)) {
@@ -139,20 +175,6 @@ interface ComicDetail {
   };
 }
 
-interface ChapterDetail {
-  id: string;
-  chap: string;
-  title: string;
-  updated_at: string;
-  md_comics: {
-    title: string;
-    slug: string;
-    md_covers?: {
-      b2key: string;
-    }[];
-  };
-}
-
 interface ChapterParams {
   limit?: number;
   lang?: string;
@@ -160,7 +182,7 @@ interface ChapterParams {
 
 export async function getComicBySlug(slug: string): Promise<ComicDetail | null> {
   try {
-    const response = await fetchWithRetry(`https://api.comick.fun/comic/${slug}`);
+    const response = await throttledFetch(`https://api.comick.fun/comic/${slug}`);
     const data = await response.json();
     
     if (!data?.comic?.hid) {
@@ -188,14 +210,14 @@ export async function getChaptersByHid(
     });
     
     // Fetch comic details including cover
-    const comicResponse = await fetchWithRetry(
+    const comicResponse = await throttledFetch(
       `https://api.comick.fun/comic/${hid}`
     );
     const comicData = await comicResponse.json();
     const comicTitle = comicData?.comic?.title || 'Unknown Comic';
     const covers = comicData?.comic?.md_covers || [];
     
-    const response = await fetchWithRetry(
+    const response = await throttledFetch(
       `https://api.comick.fun/comic/${hid}/chapters?${queryParams}`
     );
     const data = await response.json();
@@ -270,122 +292,137 @@ export async function getChaptersForSlugs(
 ): Promise<ChapterDetail[]> {
   console.log(`Fetching chapters for ${slugs.length} comics`);
   const redis = await getRedisClient();
-  const CACHE_TTL = 60 * 60;
   
   const uniqueSlugs = [...new Set(slugs)];
   const pipeline = redis.pipeline();
 
-  // Add cache key validation
+  // Check cache for all slugs
   uniqueSlugs.forEach(slug => {
     if (!slug.match(/^[a-z0-9-]+$/)) {
       console.error(`Invalid slug format: ${slug}`);
+      return; // Skip invalid slugs immediately
     }
     const cacheKey = `chapters:${slug}:${lang}`;
     pipeline.get(cacheKey);
   });
 
-  const [cacheResults, slugsToFetch] = await Promise.all([
-    pipeline.exec(),
-    validateSlugs(uniqueSlugs) // Add this new function
-  ]);
-
+  const cacheResults = await pipeline.exec();
+  
+  // Process cache results
   const cachedChapters: ChapterDetail[] = [];
+  const slugsToFetch: string[] = [];
+  
+  // Separate cached and uncached slugs in one pass
   cacheResults.forEach(([err, result], index) => {
+    const slug = uniqueSlugs[index];
     if (!err && result) {
       try {
-        const parsed = JSON.parse(result);
+        const parsed = JSON.parse(result as string);
         if (Array.isArray(parsed)) {
           cachedChapters.push(...parsed);
         }
       } catch (e) {
-        console.error(`Cache parse error for ${uniqueSlugs[index]}:`, e);
+        console.error(`Cache parse error for ${slug}:`, e);
+        slugsToFetch.push(slug);
       }
+    } else {
+      slugsToFetch.push(slug);
     }
   });
 
-  // Add progress tracking
+  // Skip validation if we have recent cache data
   const cachedSlugs = new Set(cachedChapters.map(c => c.md_comics.slug));
   console.log(`Cache hits: ${cachedChapters.length} chapters from ${cachedSlugs.size} comics`);
-  console.log(`Fetching ${slugsToFetch.length} comics from API`);
-
-  const fetchPromises = slugsToFetch.map(async (slug) => {
-    const timer = Date.now();
-    try {
-      const comicDetail = await getComicBySlug(slug);
-      
-      if (!comicDetail?.comic?.hid) {
-        console.error(`❌ No HID found for ${slug}`);
+  
+  // Only fetch if we have slugs that need fetching
+  let liveChapters: ChapterDetail[] = [];
+  if (slugsToFetch.length > 0) {
+    console.log(`Fetching ${slugsToFetch.length} comics from API`);
+    
+    // Use Promise.all for concurrent fetching with higher concurrency
+    const fetchPromises = slugsToFetch.map(async (slug) => {
+      try {
+        const comicDetail = await getComicBySlug(slug);
+        
+        if (!comicDetail?.comic?.hid) {
+          return [];
+        }
+        
+        return getChaptersByHid(comicDetail.comic.hid, slug, {
+          limit: 5,
+          lang: lang
+        });
+      } catch (error) {
+        console.error(`Error processing ${slug}:`, error);
         return [];
       }
-      
-      const chapters = await getChaptersByHid(comicDetail.comic.hid, slug, {
-        limit: 5,
-        lang: lang
+    });
+
+    liveChapters = (await Promise.all(fetchPromises)).flat();
+    
+    // Cache new results in batch if we have any
+    if (liveChapters.length > 0) {
+      const cachePipeline = redis.pipeline();
+      const chaptersBySlug: Record<string, ChapterDetail[]> = {};
+
+      liveChapters.forEach(chapter => {
+        const slug = chapter.md_comics.slug;
+        if (!chaptersBySlug[slug]) {
+          chaptersBySlug[slug] = [];
+        }
+        chaptersBySlug[slug].push(chapter);
       });
-      
-      console.log(`✅ ${slug} (${comicDetail.comic.hid}) returned ${chapters.length} chapters in ${Date.now() - timer}ms`);
-      return chapters;
-    } catch (error) {
-      console.error(`🚨 Error processing ${slug}:`, error);
-      return [];
+
+      Object.entries(chaptersBySlug).forEach(([slug, chaps]) => {
+        const cacheKey = `chapters:${slug}:${lang}`;
+        cachePipeline.set(
+          cacheKey, 
+          JSON.stringify(chaps), 
+          'EX', 
+          CHAPTER_CACHE_TTL
+        );
+      });
+
+      await cachePipeline.exec();
     }
-  });
+  }
 
-  const liveChapters = (await Promise.all(fetchPromises)).flat();
-  
-  // Cache new results in batch
-  const cachePipeline = redis.pipeline();
-  const chaptersBySlug: Record<string, ChapterDetail[]> = {};
-
-  liveChapters.forEach(chapter => {
-    const slug = chapter.md_comics.slug;
-    if (!chaptersBySlug[slug]) {
-      chaptersBySlug[slug] = [];
-    }
-    chaptersBySlug[slug].push(chapter);
-  });
-
-  Object.entries(chaptersBySlug).forEach(([slug, chaps]) => {
-    const cacheKey = `chapters:${slug}:${lang}`;
-    cachePipeline.set(
-      cacheKey, 
-      JSON.stringify(chaps), 
-      'EX', 
-      CACHE_TTL
-    );
-  });
-
-  await cachePipeline.exec();
-
-  // Combine and sort all chapters
-  const allChapters = [...cachedChapters, ...liveChapters];
-  const deduplicatedChapters = deduplicateChapters(allChapters);
-  return deduplicatedChapters.sort((a, b) => 
-    parseFloat(b.chap) - parseFloat(a.chap) ||
-    new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-  );
+  // Combine and deduplicate
+  return deduplicateChapters([...cachedChapters, ...liveChapters]);
 }
 
-// Add export to the validation function
+// Replace validateSlugs with a more efficient implementation
 export async function validateSlugs(slugs: string[]): Promise<string[]> {
+  // Skip validation in production for cached items
+  if (process.env.NODE_ENV === 'production') {
+    return slugs;
+  }
+  
   const validSlugs: string[] = [];
   const invalidSlugs: string[] = [];
   
-  await Promise.all(slugs.map(async (slug) => {
-    try {
-      const response = await fetchWithRetry(`https://api.comick.fun/comic/${slug}`, {}, 1);
-      if (response.ok) {
-        validSlugs.push(slug);
-      } else {
+  // Increase batch size for faster processing
+  const batchSize = 5;
+  for (let i = 0; i < slugs.length; i += batchSize) {
+    const batch = slugs.slice(i, i + batchSize);
+    
+    await Promise.all(batch.map(async (slug) => {
+      try {
+        // Reduced retries (1 instead of 3) and removed tachiyomi parameter
+        const response = await throttledFetch(`https://api.comick.fun/comic/${slug}`, {}, 1);
+        if (response.ok) {
+          validSlugs.push(slug);
+        } else {
+          invalidSlugs.push(slug);
+        }
+      } catch {
         invalidSlugs.push(slug);
       }
-    } catch {
-      invalidSlugs.push(slug);
-    }
-  }));
+    }));
+  }
   
   if (invalidSlugs.length > 0) {
-    console.error(`Invalid/Unavailable slugs: ${invalidSlugs.join(', ')}`);
+    console.warn(`Skipping invalid slugs: ${invalidSlugs.length} items`);
   }
   
   return validSlugs;
