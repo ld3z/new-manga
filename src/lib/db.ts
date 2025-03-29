@@ -39,6 +39,7 @@ let primaryHealthy: boolean = true;
 let primaryFailedChecks = 0;
 let replicaClients: Map<string, Redis> = new Map();
 let activeReplicaUrl: string | null = null;
+let initializationPromise: Promise<void> | null = null; // Promise to track initialization
 
 // Track which replica was used when primary was down
 let lastUsedReplica: string | null = null;
@@ -157,34 +158,92 @@ async function createRedisClient(url: string): Promise<Redis> {
  * Initialize all replicas to establish connections early
  */
 async function initializeAllClients(): Promise<void> {
-  try {
-    // Initialize primary
-    if (PRIMARY_REDIS_URL && (!primaryClient || primaryClient.status !== "ready")) {
-      primaryClient = await createRedisClient(PRIMARY_REDIS_URL);
-      primaryHealthy = await checkConnection(primaryClient, "Primary");
-      console.log(`Primary Redis initialized, healthy: ${primaryHealthy}`);
-    }
-    
-    // Initialize all replicas
-    for (const url of REPLICA_URLS) {
-      if (!replicaClients.has(url)) {
-        try {
-          const client = await createRedisClient(url);
-          const isHealthy = await checkConnection(client, getRedisName(url));
-          if (isHealthy) {
-            replicaClients.set(url, client);
-            console.log(`Replica ${getRedisName(url)} initialized successfully`);
-          }
-        } catch (error) {
-          console.error(`Failed to initialize replica ${getRedisName(url)}:`, error);
-        }
-      }
-    }
-    
-    console.log(`Initialized ${replicaClients.size} replica connections`);
-  } catch (error) {
-    console.error("Error during client initialization:", error);
+  // Prevent multiple concurrent initializations
+  if (initializationPromise) {
+    console.log("Initialization already in progress, awaiting existing promise.");
+    return initializationPromise;
   }
+
+  console.log("Starting Redis client initialization...");
+  const initStartTime = Date.now();
+
+  // Create a promise that resolves when initialization is complete
+  initializationPromise = (async () => {
+    try {
+      // Initialize primary
+      if (PRIMARY_REDIS_URL && (!primaryClient || primaryClient.status !== "ready")) {
+        console.log("Initializing primary client...");
+        primaryClient = await createRedisClient(PRIMARY_REDIS_URL);
+        primaryHealthy = await checkConnection(primaryClient, "Primary");
+        console.log(`Primary Redis initialized, healthy: ${primaryHealthy}`);
+      } else if (primaryClient) {
+        console.log(`Primary client already exists (Status: ${primaryClient.status}), checking health...`);
+        primaryHealthy = await checkConnection(primaryClient, "Primary");
+        console.log(`Primary health check result: ${primaryHealthy}`);
+      } else {
+         console.log("Primary Redis URL not configured.");
+      }
+
+      // Initialize all replicas
+      console.log(`Found ${REPLICA_URLS.length} replica URLs to initialize.`);
+      const replicaInitPromises: Promise<void>[] = [];
+
+      for (const url of REPLICA_URLS) {
+        // Add promise to array to run in parallel
+        replicaInitPromises.push(
+          (async () => {
+            // Check if already initialized and healthy
+            if (replicaClients.has(url)) {
+                const existingClient = replicaClients.get(url)!;
+                console.log(`Replica ${getRedisName(url)} already in map (Status: ${existingClient.status}), checking health...`);
+                if (await checkConnection(existingClient, getRedisName(url))) {
+                    console.log(`Replica ${getRedisName(url)} is healthy.`);
+                    return; // Skip re-initialization if healthy
+                } else {
+                    console.log(`Replica ${getRedisName(url)} found but unhealthy, attempting re-initialization.`);
+                    // Optionally disconnect the old client first
+                    existingClient.disconnect();
+                }
+            }
+
+            try {
+              console.log(`Initializing replica ${getRedisName(url)}...`);
+              const client = await createRedisClient(url);
+              const isHealthy = await checkConnection(client, getRedisName(url));
+              if (isHealthy) {
+                replicaClients.set(url, client); // Add to map *only if healthy*
+                console.log(`Replica ${getRedisName(url)} initialized successfully and added to map.`);
+              } else {
+                 console.warn(`Replica ${getRedisName(url)} initialized but failed health check.`);
+                 // Optionally disconnect if unhealthy after creation
+                 client.disconnect();
+              }
+            } catch (error) {
+              console.error(`Failed to initialize replica ${getRedisName(url)}:`, error);
+            }
+          })()
+        );
+      }
+
+      // Wait for all replica initializations to complete
+      await Promise.allSettled(replicaInitPromises);
+
+      console.log(`Initialization attempt finished. Current replica map size: ${replicaClients.size}. Time taken: ${Date.now() - initStartTime}ms`);
+
+    } catch (error) {
+      console.error("CRITICAL Error during client initialization process:", error);
+      // Reset promise on critical failure to allow retry
+      initializationPromise = null;
+      throw error; // Re-throw if needed
+    } finally {
+       // Keep the promise reference after success, but maybe reset after some time?
+       // For now, keep it to prevent re-running unnecessarily.
+       // If you suspect clients disconnect often, you might want to clear this promise
+       // periodically or on errors to force re-initialization attempts.
+    }
+  })(); // Immediately invoke the async IIFE
+
+  return initializationPromise;
 }
 
 /**
@@ -211,23 +270,18 @@ async function checkConnection(client: Redis, name: string): Promise<boolean> {
  * Returns the client and its connection URL.
  */
 export async function getRedisClient(): Promise<{ client: Redis; url: string }> {
+  // Ensure initialization has been attempted at least once
+  if (!initializationPromise) {
+      console.log("[getRedisClient] Initialization promise not found, triggering initialization...");
+      await initializeAllClients(); // Await the first initialization attempt
+  } else {
+      // Optional: Await if already running, prevents race conditions on first load
+      // await initializationPromise;
+  }
+
+
   // Try primary client first if it's considered healthy
-  if (primaryHealthy && (primaryClient === null || primaryClient.status !== "ready")) {
-    try {
-      primaryClient = await createRedisClient(PRIMARY_REDIS_URL!);
-      const isPrimaryConnected = await checkConnection(primaryClient, "Primary");
-      primaryHealthy = isPrimaryConnected;
-      if (isPrimaryConnected) {
-        primaryFailedChecks = 0;
-        console.log("Initialized primary Redis connection");
-        return { client: primaryClient, url: PRIMARY_REDIS_URL! }; // <-- Return URL
-      }
-    } catch (err) {
-      console.error("Failed to initialize primary Redis:", err);
-      primaryHealthy = false;
-      primaryFailedChecks++;
-    }
-  } else if (primaryHealthy && primaryClient && primaryClient.status === "ready") {
+  if (primaryHealthy && primaryClient && primaryClient.status === "ready") {
     // Check connection just in case before returning
     if (await checkConnection(primaryClient, "Primary")) {
         return { client: primaryClient, url: PRIMARY_REDIS_URL! }; // <-- Return URL
@@ -239,6 +293,18 @@ export async function getRedisClient(): Promise<{ client: Redis; url: string }> 
     }
   }
 
+  // --- Replica Logic ---
+  console.log(`[getRedisClient] Primary unhealthy or unavailable. Checking replicas. Current map size: ${replicaClients.size}`);
+
+  // If the map is empty, maybe initialization failed or hasn't run? Try again.
+  // This adds robustness but might hide underlying init issues if called repeatedly.
+  if (replicaClients.size === 0 && REPLICA_URLS.length > 0) {
+      console.warn("[getRedisClient] Replica map is empty, attempting re-initialization...");
+      await initializeAllClients(); // Await re-initialization attempt
+      console.log(`[getRedisClient] Re-initialization finished. New map size: ${replicaClients.size}`);
+  }
+
+
   // Primary is unhealthy, try to use the active replica if we have one
   if (activeReplicaUrl && replicaClients.has(activeReplicaUrl)) {
     const activeReplica = replicaClients.get(activeReplicaUrl)!;
@@ -249,34 +315,69 @@ export async function getRedisClient(): Promise<{ client: Redis; url: string }> 
     }
   }
 
-  // No active replica, try replicas in order
+  // No active replica, try replicas in order (using the potentially updated map)
+  console.log(`[getRedisClient] No active replica. Iterating through ${replicaClients.size} clients in map...`);
+  // Iterate through the *map* instead of the URL list first
+  for (const [url, client] of replicaClients.entries()) {
+      const clientName = getRedisName(url);
+      console.log(`[getRedisClient] Checking client from map: ${clientName} (Status: ${client.status})`);
+      if (client.status === "ready" && await checkConnection(client, clientName)) {
+          console.log(`[getRedisClient] Using healthy client from map: ${clientName}`);
+          activeReplicaUrl = url;
+          lastUsedReplica = url;
+          // Promotion logic remains the same
+          if (primaryFailedChecks >= REPLICA_PROMOTION_THRESHOLD) {
+             console.log(`Promoting ${getRedisName(url)} to primary after ${primaryFailedChecks} failed checks`);
+             primaryClient = client; // The client instance is now considered primary
+             primaryHealthy = true;
+             primaryFailedChecks = 0;
+             // Note: PRIMARY_REDIS_URL still points to the original primary config.
+             // The 'url' returned here is the replica's URL, which is correct for identifying the *current* primary instance.
+          }
+          return { client: client, url: url };
+      } else {
+          console.log(`[getRedisClient] Client ${clientName} from map is not ready or failed check.`);
+      }
+  }
+
+  // If no client in the map worked, fall back to trying URLs again (covers cases where a client wasn't added to map)
+  console.log(`[getRedisClient] No suitable client found in map. Falling back to iterating through REPLICA_URLS (${REPLICA_URLS.length})...`);
   for (const url of REPLICA_URLS) {
+    const clientName = getRedisName(url);
     try {
       let client = replicaClients.get(url);
+      // If client exists but wasn't ready above, try creating a new one
       if (!client || client.status !== "ready") {
+        console.log(`[getRedisClient] Client ${clientName} not in map or not ready. Attempting connection...`);
         client = await createRedisClient(url);
+        // Add to map immediately upon successful creation attempt, check health next
         replicaClients.set(url, client);
+        console.log(`[getRedisClient] Added/updated client ${clientName} in map.`);
       }
 
-      if (await checkConnection(client, getRedisName(url))) {
-        console.log(`Switching to replica: ${getRedisName(url)}`);
+      if (await checkConnection(client, clientName)) {
+        console.log(`[getRedisClient] Successfully connected/verified replica: ${clientName}`);
         activeReplicaUrl = url;
-        lastUsedReplica = url; // Track that we used this replica
-
-        // If primary has been down for a while, promote this replica to be the new primary
+        lastUsedReplica = url;
+        // Promotion logic remains the same
         if (primaryFailedChecks >= REPLICA_PROMOTION_THRESHOLD) {
-          console.log(`Promoting ${getRedisName(url)} to primary after ${primaryFailedChecks} failed checks`);
-          primaryClient = client; // The client instance is now considered primary
-          primaryHealthy = true;
-          primaryFailedChecks = 0;
-          // Note: PRIMARY_REDIS_URL still points to the original primary config.
-          // The 'url' returned here is the replica's URL, which is correct for identifying the *current* primary instance.
+           console.log(`Promoting ${getRedisName(url)} to primary after ${primaryFailedChecks} failed checks`);
+           primaryClient = client; // The client instance is now considered primary
+           primaryHealthy = true;
+           primaryFailedChecks = 0;
+           // Note: PRIMARY_REDIS_URL still points to the original primary config.
+           // The 'url' returned here is the replica's URL, which is correct for identifying the *current* primary instance.
         }
-
-        return { client: client, url: url }; // <-- Return URL
+        return { client: client, url: url };
+      } else {
+         console.log(`[getRedisClient] Health check failed for ${clientName} after connection attempt.`);
+         // Optionally remove from map if health check fails immediately after creation?
+         // replicaClients.delete(url);
       }
     } catch (err) {
-      console.error(`Failed to connect to replica ${getRedisName(url)}:`, err);
+      console.error(`[getRedisClient] Failed to connect to replica ${clientName}:`, err);
+      // Remove from map if connection failed
+      replicaClients.delete(url);
     }
   }
 
@@ -404,19 +505,21 @@ export async function getFeedMapping(
     // Check for compressed version first
     const compressedKey = `${feedId}:compressed`;
     console.log(`[getFeedMapping] Checking for compressed key: ${compressedKey} on ${clientName}`);
-    const compressedData = await client.get(compressedKey);
+    const compressedData = await client.get(compressedKey); // This is the base64 string
 
     if (compressedData) {
       console.log(`[getFeedMapping] SUCCESS: Found compressed data for ${feedId} on ${clientName}`);
       try {
-        // Decompress and parse
+        // Decompress and parse (still needed to return the correct format)
         const buffer = Buffer.from(compressedData, 'base64');
         const decompressed = await gunzip(buffer);
         const data = JSON.parse(decompressed.toString());
 
-        // Reset expiration
-        console.log(`[getFeedMapping] Resetting TTL for compressed key ${compressedKey} on ${clientName}`);
-        await client.expire(compressedKey, DEFAULT_CACHE_TTL);
+        // --- Replicate the COMPRESSED data using ensurePrimaryAndReplicate ---
+        console.log(`[getFeedMapping] Triggering DATA replication for compressed key ${compressedKey}`);
+        ensurePrimaryAndReplicate(clientUrl, compressedKey, compressedData, DEFAULT_CACHE_TTL) // Pass raw compressedData
+            .catch(err => console.error(`[getFeedMapping] Error during background DATA replication for ${compressedKey}:`, err));
+        // --- End Change ---
 
         return {
           slugs: data.slugs,
@@ -433,7 +536,14 @@ export async function getFeedMapping(
     // If no compressed version, try regular key
     const regularKey = feedId;
     console.log(`[getFeedMapping] Checking for regular key: ${regularKey} on ${clientName}`);
-    let jsonString = await client.get(regularKey);
+    let jsonString = await client.get(regularKey); // This is the JSON string
+
+    // --- Variables to track source if found on replica ---
+    let foundOnReplica = false;
+    let replicaUrlSource: string | null = null;
+    let valueFromReplica: string | null = null; // Store value found on replica
+    let isValueFromReplicaCompressed = false; // Track if replica value was compressed
+    // ---
 
     if (jsonString) {
         console.log(`[getFeedMapping] SUCCESS: Found regular key ${regularKey} on ${clientName}`);
@@ -450,35 +560,35 @@ export async function getFeedMapping(
           try {
             console.log(`[getFeedMapping] Checking replica ${replicaName} for key ${regularKey}`);
             // Check compressed key on replica first
-            const replicaCompressedData = await replicaClient.get(compressedKey);
+            const replicaCompressedData = await replicaClient.get(compressedKey); // Base64 string
             if (replicaCompressedData) {
                 console.log(`[getFeedMapping] SUCCESS: Found COMPRESSED key ${compressedKey} on REPLICA ${replicaName}`);
                  try {
+                    // Decompress for return value, but store the raw compressed data for replication
                     const buffer = Buffer.from(replicaCompressedData, 'base64');
                     const decompressed = await gunzip(buffer);
                     const data = JSON.parse(decompressed.toString());
-                    // Sync back to primary
-                    if (primaryClient && primaryClient.status === "ready") {
-                        console.log(`[getFeedMapping] Syncing COMPRESSED key ${compressedKey} from ${replicaName} back to PRIMARY`);
-                        primaryClient.set(compressedKey, replicaCompressedData, "EX", DEFAULT_CACHE_TTL)
-                          .catch(err => console.error(`[getFeedMapping] Failed to sync compressed key ${compressedKey} to primary:`, err));
-                    }
+
+                    // --- Replicate the COMPRESSED data found on replica ---
+                    console.log(`[getFeedMapping] Triggering DATA replication for compressed key ${compressedKey} (found on replica ${replicaName})`);
+                    ensurePrimaryAndReplicate(replicaUrl, compressedKey, replicaCompressedData, DEFAULT_CACHE_TTL) // Pass raw replicaCompressedData
+                         .catch(err => console.error(`[getFeedMapping] Error during background DATA replication for ${compressedKey}:`, err));
+                    // --- End Change ---
+
                     return { slugs: data.slugs, lang: data.lang };
                  } catch (error) {
                     console.error(`[getFeedMapping] Error decompressing data for ${feedId} from REPLICA ${replicaName}:`, error);
                  }
             } else {
                  console.log(`[getFeedMapping] No compressed key found on replica ${replicaName}. Checking regular key ${regularKey}...`);
-                 jsonString = await replicaClient.get(regularKey);
-                 if (jsonString) {
+                 const replicaJsonString = await replicaClient.get(regularKey); // JSON string
+                 if (replicaJsonString) {
                    console.log(`[getFeedMapping] SUCCESS: Found REGULAR key ${regularKey} on REPLICA ${replicaName}`);
-
-                   // Sync this key back to primary for future requests
-                   if (primaryClient && primaryClient.status === "ready") {
-                     console.log(`[getFeedMapping] Syncing REGULAR key ${regularKey} from ${replicaName} back to PRIMARY`);
-                     primaryClient.set(regularKey, jsonString, "EX", DEFAULT_CACHE_TTL)
-                       .catch(err => console.error(`[getFeedMapping] Failed to sync regular key ${regularKey} to primary:`, err));
-                   }
+                   foundOnReplica = true;
+                   replicaUrlSource = replicaUrl;
+                   valueFromReplica = replicaJsonString; // Store the value found
+                   isValueFromReplicaCompressed = false; // Mark as not compressed
+                   jsonString = replicaJsonString; // Use this value going forward
 
                    break; // Found on this replica, stop checking others
                  } else {
@@ -501,20 +611,18 @@ export async function getFeedMapping(
         return null;
     }
 
-    // --- Reset TTL for the regular key now that we have its value ---
-    console.log(`[getFeedMapping] Resetting TTL for regular key ${regularKey} on ${clientName}`);
-    // Use try-catch for the expire call to prevent it from stopping data return if expire fails
-    try {
-        // Reset TTL on the client instance we initially connected to
-        await client.expire(regularKey, DEFAULT_CACHE_TTL);
-    } catch (expireError) {
-        console.warn(`[getFeedMapping] Failed to reset TTL for regular key ${regularKey} on ${clientName}:`, expireError);
-    }
-    // --- End TTL Reset ---
+    // --- Replicate the REGULAR data using ensurePrimaryAndReplicate ---
+    // This block is reached if the regular key was found (either initially or on a replica)
+    // AND the compressed key was not found anywhere.
+    console.log(`[getFeedMapping] Triggering DATA replication for regular key ${regularKey}`);
+    const sourceUrlForReplication = foundOnReplica ? replicaUrlSource! : clientUrl;
+    ensurePrimaryAndReplicate(sourceUrlForReplication, regularKey, jsonString, DEFAULT_CACHE_TTL) // Pass the jsonString
+        .catch(err => console.error(`[getFeedMapping] Error during background DATA replication for ${regularKey}:`, err));
+    // --- End Change ---
 
     // Parse the result (jsonString has the data from either initial client or replica)
     try {
-        const data = JSON.parse(jsonString); // Removed 'as string' for potentially better type safety if needed
+        const data = JSON.parse(jsonString);
         return {
           slugs: data.slugs,
           lang: data.lang
@@ -824,6 +932,7 @@ async function ensurePrimaryAndReplicate(
   }
 
   // 2. Replicate to other available replicas
+  console.log(`[ensurePrimaryAndReplicate] Current replicaClients map size: ${replicaClients.size}, Keys: ${Array.from(replicaClients.keys())}`);
   console.log(`[ensurePrimaryAndReplicate] Checking ${replicaClients.size} replicas for ${operationType} on key ${key}`);
   for (const [replicaUrl, replicaClient] of replicaClients.entries()) {
     const replicaName = getRedisName(replicaUrl);
@@ -971,10 +1080,11 @@ async function syncFromReplicaToPrimary(replicaUrl: string): Promise<void> {
 
 // Initialize connections eagerly to establish connections as soon as possible
 if (!import.meta.env.SSR) {
+  // Trigger initialization but don't block module loading
   initializeAllClients()
-    .then(() => console.log("Redis clients initialized"))
-    .catch(err => console.error("Failed to initialize Redis clients:", err));
+    .then(() => console.log("Initial background Redis client initialization attempt complete."))
+    .catch(err => console.error("Initial background Redis client initialization failed:", err));
 }
 
 // Initialize connections lazily as backup
-console.log("Redis will connect on first use");
+console.log("Redis will connect on first use (or relies on background initialization).");
