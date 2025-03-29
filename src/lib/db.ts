@@ -495,21 +495,35 @@ export async function getFeedMapping(
       }
     }
 
+    // If jsonString is still null/empty after checks, the key wasn't found
     if (!jsonString) {
         console.log(`[getFeedMapping] Key ${feedId} (and compressed variant) not found on any checked instance.`);
         return null;
     }
 
-    // Reset expiration on access (only if found via regular key initially or synced from replica)
+    // --- Reset TTL for the regular key now that we have its value ---
     console.log(`[getFeedMapping] Resetting TTL for regular key ${regularKey} on ${clientName}`);
-    await client.expire(regularKey, DEFAULT_CACHE_TTL);
+    // Use try-catch for the expire call to prevent it from stopping data return if expire fails
+    try {
+        // Reset TTL on the client instance we initially connected to
+        await client.expire(regularKey, DEFAULT_CACHE_TTL);
+    } catch (expireError) {
+        console.warn(`[getFeedMapping] Failed to reset TTL for regular key ${regularKey} on ${clientName}:`, expireError);
+    }
+    // --- End TTL Reset ---
 
-    // Parse the result
-    const data = JSON.parse(jsonString as string);
-    return {
-      slugs: data.slugs,
-      lang: data.lang
-    };
+    // Parse the result (jsonString has the data from either initial client or replica)
+    try {
+        const data = JSON.parse(jsonString); // Removed 'as string' for potentially better type safety if needed
+        return {
+          slugs: data.slugs,
+          lang: data.lang
+        };
+    } catch (parseError) {
+        console.error(`[getFeedMapping] CRITICAL ERROR parsing feed mapping JSON for ${feedId}:`, parseError, `JSON String: ${jsonString}`);
+        return null; // Return null if parsing fails
+    }
+
   } catch (error) {
     console.error(`[getFeedMapping] CRITICAL ERROR retrieving feed mapping for ${feedId}:`, error);
     return null;
