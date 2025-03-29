@@ -291,7 +291,7 @@ export async function getChaptersForSlugs(
   lang: string = 'en'
 ): Promise<ChapterDetail[]> {
   console.log(`Fetching chapters for ${slugs.length} comics`);
-  const redis = await getRedisClient();
+  const { client: redis } = await getRedisClient();
   
   const uniqueSlugs = [...new Set(slugs)];
   const pipeline = redis.pipeline();

@@ -323,232 +323,6 @@ async function getAvailableReplicas(activeClientUrl: string): Promise<Redis[]> {
 }
 
 /**
- * Ensures data is written to the primary instance (if available and not the source)
- * and replicates to other available replicas.
- */
-async function ensurePrimaryAndReplicate(
-  sourceUrl: string, // The URL of the instance that initially received the write
-  key: string,
-  value: string,
-  ttl?: number
-): Promise<void> {
-  const replicationTasks: Promise<any>[] = [];
-  const targetUrls = new Set<string>(); // Keep track of where we tried to write/replicate
-
-  const operationDesc = ttl ? `set ${key} EX ${ttl}` : `set ${key}`;
-
-  // 1. Attempt to write to Primary (if it wasn't the source and exists)
-  if (PRIMARY_REDIS_URL && primaryClient && sourceUrl !== PRIMARY_REDIS_URL) {
-    targetUrls.add(PRIMARY_REDIS_URL);
-    const primaryName = getRedisName(PRIMARY_REDIS_URL);
-    console.log(`[Replication] Ensuring key ${key} on ${primaryName}`);
-    replicationTasks.push(
-      (async () => {
-        try {
-          // Check status, maybe ping if not ready but exists
-          if (primaryClient.status !== 'ready') {
-             await primaryClient.ping().catch(() => {}); // Try a ping, ignore error
-          }
-
-          if (primaryClient.status === 'ready') {
-             if (ttl) {
-               await primaryClient.set(key, value, 'EX', ttl);
-             } else {
-               await primaryClient.set(key, value);
-             }
-             console.log(`[Replication] Successfully synced key ${key} to ${primaryName}`);
-             return { url: PRIMARY_REDIS_URL, status: 'fulfilled' };
-          } else {
-             // Don't throw, just log that primary wasn't ready for sync
-             console.warn(`[Replication] Primary client not ready during sync attempt for key ${key}`);
-             return { url: PRIMARY_REDIS_URL, status: 'skipped', reason: 'not ready' };
-          }
-        } catch (error) {
-          console.error(`[Replication] Failed to sync key ${key} to ${primaryName}:`, error);
-          // Propagate the error status but don't throw to allow other replications
-          return { url: PRIMARY_REDIS_URL, status: 'rejected', error };
-        }
-      })()
-    );
-  } else if (sourceUrl === PRIMARY_REDIS_URL) {
-      // If the source *was* the primary, add it to targets so we don't try replicating back to it
-      targetUrls.add(PRIMARY_REDIS_URL);
-      console.log(`[Replication] Key ${key} was initially written to Primary.`);
-  }
-
-  // 2. Replicate to other available Replicas
-  // Ensure replica clients are potentially initialized
-  await initializeAllClients().catch(err => console.error("Error initializing clients during replication:", err));
-
-  for (const [url, replicaClient] of replicaClients.entries()) {
-    // Replicate if:
-    // - It's not the original source instance
-    // - It hasn't already been targeted (e.g., it's not the primary we just tried)
-    // - It's ready
-    if (url !== sourceUrl && !targetUrls.has(url) && replicaClient.status === 'ready') {
-       targetUrls.add(url); // Mark as targeted for replication
-       const replicaName = getRedisName(url);
-       console.log(`[Replication] Replicating key ${key} to ${replicaName}`);
-       replicationTasks.push(
-         (async () => {
-           try {
-             if (ttl) {
-               await replicaClient.set(key, value, 'EX', ttl);
-             } else {
-               await replicaClient.set(key, value);
-             }
-             console.log(`[Replication] Successfully replicated key ${key} to ${replicaName}`);
-             return { url: url, status: 'fulfilled' };
-           } catch (error) {
-             console.error(`[Replication] Replication failed for key ${key} to ${replicaName}:`, error);
-             return { url: url, status: 'rejected', error };
-           }
-         })()
-       );
-    } else if (url !== sourceUrl && !targetUrls.has(url)) {
-        // Log if a replica was skipped because it wasn't ready
-        console.warn(`[Replication] Skipping replication of key ${key} to ${getRedisName(url)} (not ready or already targeted). Status: ${replicaClient?.status}`);
-    }
-  }
-
-  // Wait for all replication tasks to settle
-  if (replicationTasks.length > 0) {
-     console.log(`[Replication] Waiting for ${replicationTasks.length} tasks for key ${key}...`);
-     const results = await Promise.allSettled(replicationTasks);
-
-     let successfulSync = 0;
-     let failedSync = 0;
-     let skippedSync = 0;
-
-     results.forEach(result => {
-        if (result.status === 'fulfilled') {
-            if (result.value.status === 'fulfilled') successfulSync++;
-            else if (result.value.status === 'rejected') failedSync++;
-            else if (result.value.status === 'skipped') skippedSync++;
-        } else {
-            // Promise itself rejected (unexpected)
-            failedSync++;
-            console.error("[Replication] Unexpected Promise rejection:", result.reason);
-        }
-     });
-
-     console.log(`[Replication] Tasks for key ${key} completed: ${successfulSync} succeeded, ${failedSync} failed, ${skippedSync} skipped.`);
-  } else {
-     console.log(`[Replication] No replication targets found or needed for key ${key} (Source: ${getRedisName(sourceUrl)})`);
-  }
-}
-
-/**
- * Synchronize data from a replica to the primary
- * Used when primary recovers after being down
- */
-async function syncFromReplicaToPrimary(replicaUrl: string): Promise<void> {
-  if (!primaryClient || primaryClient.status !== "ready" || !replicaClients.has(replicaUrl)) {
-    console.log("Cannot sync: primary or replica not available");
-    return;
-  }
-  
-  const replicaClient = replicaClients.get(replicaUrl)!;
-  console.log(`Starting sync from ${getRedisName(replicaUrl)} to Primary...`);
-  
-  try {
-    // Get all feed keys using scan to prevent blocking
-    const feedKeys: string[] = [];
-    let cursor = '0';
-    
-    do {
-      const [nextCursor, keys] = await replicaClient.scan(
-        cursor, 
-        'MATCH', 
-        '[0-9a-f]*', // Match feed IDs (hex format)
-        'COUNT',
-        '100'
-      );
-      
-      cursor = nextCursor;
-      feedKeys.push(...keys);
-    } while (cursor !== '0');
-    
-    // Also try scanning for any key pattern that might be a feed ID
-    cursor = '0';
-    const additionalKeys: string[] = [];
-    
-    do {
-      const [nextCursor, keys] = await replicaClient.scan(
-        cursor,
-        'MATCH',
-        'feed:*', // Try another pattern
-        'COUNT',
-        '100'
-      );
-      
-      cursor = nextCursor;
-      additionalKeys.push(...keys);
-    } while (cursor !== '0');
-    
-    feedKeys.push(...additionalKeys);
-    
-    // Get chapter cache keys
-    const chapterKeys: string[] = [];
-    cursor = '0';
-    
-    do {
-      const [nextCursor, keys] = await replicaClient.scan(
-        cursor,
-        'MATCH',
-        'chapters:*',
-        'COUNT',
-        '100'
-      );
-      
-      cursor = nextCursor;
-      chapterKeys.push(...keys);
-    } while (cursor !== '0');
-    
-    console.log(`Found ${feedKeys.length} feed keys and ${chapterKeys.length} chapter keys to sync`);
-    
-    // Sync feed mappings
-    if (feedKeys.length > 0) {
-      const feedPipeline = primaryClient.pipeline();
-      
-      for (const key of feedKeys) {
-        const value = await replicaClient.get(key);
-        const ttl = await replicaClient.ttl(key);
-        
-        if (value && ttl > 0) {
-          feedPipeline.set(key, value, 'EX', ttl);
-        }
-      }
-      
-      await feedPipeline.exec();
-      console.log(`Synced ${feedKeys.length} feed mappings from replica to primary`);
-    }
-    
-    // Sync chapter cache
-    if (chapterKeys.length > 0) {
-      const chapterPipeline = primaryClient.pipeline();
-      
-      for (const key of chapterKeys) {
-        const value = await replicaClient.get(key);
-        const ttl = await replicaClient.ttl(key);
-        
-        if (value && ttl > 0) {
-          chapterPipeline.set(key, value, 'EX', ttl);
-        }
-      }
-      
-      await chapterPipeline.exec();
-      console.log(`Synced ${chapterKeys.length} chapter caches from replica to primary`);
-    }
-    
-    lastUsedReplica = null; // Reset after successful sync
-    console.log("Replica to primary sync completed successfully");
-  } catch (error) {
-    console.error("Error during replica to primary sync:", error);
-  }
-}
-
-/**
  * Store a feed mapping in Redis with immediate replication
  */
 export async function storeFeedMapping(
@@ -582,23 +356,27 @@ export async function storeFeedMapping(
       isCompressed = true;
 
       // Store with compression flag on the active client
+      console.log(`[storeFeedMapping] Attempting initial SET (compressed) for key ${keyToStore} to ${getRedisName(activeUrl)}`);
       await redis.set(keyToStore, valueToStore, "EX", DEFAULT_CACHE_TTL);
-      console.log(`Stored compressed mapping (${valueToStore.length} bytes) to ${getRedisName(activeUrl)}`);
+      console.log(`[storeFeedMapping] SUCCESS: Stored compressed mapping (${valueToStore.length} bytes) to ${getRedisName(activeUrl)}`);
 
     } else {
       // Use standard set operations without compression on the active client
+      console.log(`[storeFeedMapping] Attempting initial SET for key ${keyToStore} to ${getRedisName(activeUrl)}`);
       await redis.set(keyToStore, valueToStore, "EX", DEFAULT_CACHE_TTL);
-      console.log(`Stored mapping for feed ${feedId} to ${getRedisName(activeUrl)}`);
+      console.log(`[storeFeedMapping] SUCCESS: Stored mapping for feed ${feedId} to ${getRedisName(activeUrl)}`);
     }
 
     // Ensure data is on primary and replicate to others
     // Use the key/value that were actually stored (potentially compressed)
+    console.log(`[storeFeedMapping] Calling ensurePrimaryAndReplicate for key ${keyToStore} (source: ${getRedisName(activeUrl)})`);
     await ensurePrimaryAndReplicate(activeUrl, keyToStore, valueToStore, DEFAULT_CACHE_TTL);
 
-    console.log(`Successfully processed storage and replication for feed ${feedId}`);
+    console.log(`[storeFeedMapping] Successfully processed storage and replication for feed ${feedId}`);
 
   } catch (error) {
-    console.error(`Error storing feed mapping for ${feedId}:`, error);
+    // Log the specific error during the initial write attempt
+    console.error(`[storeFeedMapping] CRITICAL ERROR storing feed mapping for ${feedId} (key: ${keyToStore}):`, error);
     // Consider if the error happened during initial write or replication
     // If initial write failed, ensurePrimaryAndReplicate wouldn't have run
     throw error; // Re-throw the error after logging
@@ -920,6 +698,198 @@ export async function getBatchFeedMappings(
   } catch (error) {
     console.error(`Error retrieving batch feed mappings:`, error);
     return {};
+  }
+}
+
+/**
+ * Ensures data is written to the primary (if not the source) and replicated.
+ * Logs sync attempts and outcomes without throwing errors for replication failures.
+ */
+async function ensurePrimaryAndReplicate(
+  sourceUrl: string,
+  key: string,
+  value: string,
+  ttl: number
+): Promise<void> {
+  const replicationTasks: Promise<any>[] = [];
+  const sourceName = getRedisName(sourceUrl);
+  const primaryUrl = PRIMARY_REDIS_URL;
+  const primaryName = getRedisName(primaryUrl!);
+
+  console.log(`[ensurePrimaryAndReplicate] Starting sync for key ${key}. Source: ${sourceName}`);
+
+  // 1. Sync to Primary (if source wasn't primary and primary exists/is healthy)
+  if (primaryClient && sourceUrl !== primaryUrl) {
+    const primaryStatus = primaryClient.status;
+    console.log(`[ensurePrimaryAndReplicate] Checking primary (${primaryName}) status: ${primaryStatus}`);
+    let primaryIsReady = primaryStatus === 'ready';
+
+    if (!primaryIsReady) {
+        try {
+            await primaryClient.ping();
+            primaryIsReady = true;
+            console.log(`[ensurePrimaryAndReplicate] Primary (${primaryName}) ping successful after status check.`);
+        } catch (pingErr) {
+            console.warn(`[ensurePrimaryAndReplicate] Primary (${primaryName}) ping failed, skipping sync attempt. Status: ${primaryStatus}`, pingErr);
+        }
+    }
+
+    if (primaryIsReady) {
+      console.log(`[ensurePrimaryAndReplicate] Attempting sync to PRIMARY (${primaryName}) for key ${key}`);
+      replicationTasks.push(
+        primaryClient.set(key, value, "EX", ttl)
+          .then(() => console.log(`[ensurePrimaryAndReplicate] SUCCESS: Synced key ${key} to PRIMARY (${primaryName})`))
+          .catch(err => console.error(`[ensurePrimaryAndReplicate] FAILED: Sync key ${key} to PRIMARY (${primaryName})`, err))
+      );
+    } else {
+       console.log(`[ensurePrimaryAndReplicate] SKIPPED: Sync to PRIMARY (${primaryName}) because it's not ready (Status: ${primaryStatus}).`);
+    }
+  } else if (sourceUrl === primaryUrl) {
+      console.log(`[ensurePrimaryAndReplicate] Source was PRIMARY (${primaryName}), no primary sync needed for key ${key}.`);
+  } else {
+      console.log(`[ensurePrimaryAndReplicate] Primary client not available, cannot sync key ${key} to primary.`);
+  }
+
+  // 2. Replicate to other available replicas
+  console.log(`[ensurePrimaryAndReplicate] Checking ${replicaClients.size} replicas for key ${key}`);
+  for (const [replicaUrl, replicaClient] of replicaClients.entries()) {
+    const replicaName = getRedisName(replicaUrl);
+    // Don't replicate back to the source or to the primary (if primary sync was attempted above)
+    if (replicaUrl !== sourceUrl && replicaUrl !== primaryUrl) {
+       const replicaStatus = replicaClient.status;
+       console.log(`[ensurePrimaryAndReplicate] Checking replica ${replicaName} status: ${replicaStatus}`);
+      if (replicaStatus === 'ready') {
+        console.log(`[ensurePrimaryAndReplicate] Attempting replication to REPLICA (${replicaName}) for key ${key}`);
+        replicationTasks.push(
+          replicaClient.set(key, value, "EX", ttl)
+            .then(() => console.log(`[ensurePrimaryAndReplicate] SUCCESS: Replicated key ${key} to REPLICA (${replicaName})`))
+            .catch(err => console.error(`[ensurePrimaryAndReplicate] FAILED: Replicate key ${key} to REPLICA (${replicaName})`, err))
+        );
+      } else {
+         console.log(`[ensurePrimaryAndReplicate] SKIPPED: Replication to REPLICA (${replicaName}) because it's not ready (Status: ${replicaStatus}).`);
+      }
+    } else {
+        console.log(`[ensurePrimaryAndReplicate] SKIPPED: Replication to ${replicaName} (Source or Primary) for key ${key}.`);
+    }
+  }
+
+  // Wait for all sync/replication attempts to settle
+  if (replicationTasks.length > 0) {
+    console.log(`[ensurePrimaryAndReplicate] Waiting for ${replicationTasks.length} sync/replication tasks for key ${key}...`);
+    const results = await Promise.allSettled(replicationTasks);
+    console.log(`[ensurePrimaryAndReplicate] Sync/replication tasks settled for key ${key}. Results:`, results.map(r => r.status));
+  } else {
+     console.log(`[ensurePrimaryAndReplicate] No sync/replication tasks needed for key ${key}.`);
+  }
+}
+
+/**
+ * Synchronize data from a replica to the primary
+ * Used when primary recovers after being down
+ */
+async function syncFromReplicaToPrimary(replicaUrl: string): Promise<void> {
+  if (!primaryClient || primaryClient.status !== "ready" || !replicaClients.has(replicaUrl)) {
+    console.log("Cannot sync: primary or replica not available");
+    return;
+  }
+  
+  const replicaClient = replicaClients.get(replicaUrl)!;
+  console.log(`Starting sync from ${getRedisName(replicaUrl)} to Primary...`);
+  
+  try {
+    // Get all feed keys using scan to prevent blocking
+    const feedKeys: string[] = [];
+    let cursor = '0';
+    
+    do {
+      const [nextCursor, keys] = await replicaClient.scan(
+        cursor, 
+        'MATCH', 
+        '[0-9a-f]*', // Match feed IDs (hex format)
+        'COUNT',
+        '100'
+      );
+      
+      cursor = nextCursor;
+      feedKeys.push(...keys);
+    } while (cursor !== '0');
+    
+    // Also try scanning for any key pattern that might be a feed ID
+    cursor = '0';
+    const additionalKeys: string[] = [];
+    
+    do {
+      const [nextCursor, keys] = await replicaClient.scan(
+        cursor,
+        'MATCH',
+        'feed:*', // Try another pattern
+        'COUNT',
+        '100'
+      );
+      
+      cursor = nextCursor;
+      additionalKeys.push(...keys);
+    } while (cursor !== '0');
+    
+    feedKeys.push(...additionalKeys);
+    
+    // Get chapter cache keys
+    const chapterKeys: string[] = [];
+    cursor = '0';
+    
+    do {
+      const [nextCursor, keys] = await replicaClient.scan(
+        cursor,
+        'MATCH',
+        'chapters:*',
+        'COUNT',
+        '100'
+      );
+      
+      cursor = nextCursor;
+      chapterKeys.push(...keys);
+    } while (cursor !== '0');
+    
+    console.log(`Found ${feedKeys.length} feed keys and ${chapterKeys.length} chapter keys to sync`);
+    
+    // Sync feed mappings
+    if (feedKeys.length > 0) {
+      const feedPipeline = primaryClient.pipeline();
+      
+      for (const key of feedKeys) {
+        const value = await replicaClient.get(key);
+        const ttl = await replicaClient.ttl(key);
+        
+        if (value && ttl > 0) {
+          feedPipeline.set(key, value, 'EX', ttl);
+        }
+      }
+      
+      await feedPipeline.exec();
+      console.log(`Synced ${feedKeys.length} feed mappings from replica to primary`);
+    }
+    
+    // Sync chapter cache
+    if (chapterKeys.length > 0) {
+      const chapterPipeline = primaryClient.pipeline();
+      
+      for (const key of chapterKeys) {
+        const value = await replicaClient.get(key);
+        const ttl = await replicaClient.ttl(key);
+        
+        if (value && ttl > 0) {
+          chapterPipeline.set(key, value, 'EX', ttl);
+        }
+      }
+      
+      await chapterPipeline.exec();
+      console.log(`Synced ${chapterKeys.length} chapter caches from replica to primary`);
+    }
+    
+    lastUsedReplica = null; // Reset after successful sync
+    console.log("Replica to primary sync completed successfully");
+  } catch (error) {
+    console.error("Error during replica to primary sync:", error);
   }
 }
 
