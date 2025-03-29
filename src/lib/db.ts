@@ -337,48 +337,53 @@ export async function storeFeedMapping(
   };
 
   const stringValue = JSON.stringify(mapping);
-  let keyToStore = feedId;
-  let valueToStore = stringValue;
-  let isCompressed = false;
+  const regularKey = feedId; // Key for the non-compressed version
+  const compressedKey = `${feedId}:compressed`; // Key for the compressed version
 
   try {
-    // Get Redis client AND its URL
-    const { client: redis, url: activeUrl } = await getRedisClient(); // <-- Destructure result
+    const { client: redis, url: activeUrl } = await getRedisClient();
+    const clientName = getRedisName(activeUrl);
 
-    // Check if compression should be used
+    // --- 1. Store the non-compressed version ALWAYS ---
+    console.log(`[storeFeedMapping] Attempting initial SET for regular key ${regularKey} to ${clientName}`);
+    await redis.set(regularKey, stringValue, "EX", DEFAULT_CACHE_TTL);
+    console.log(`[storeFeedMapping] SUCCESS: Stored regular mapping for feed ${feedId} to ${clientName}`);
+
+    // Replicate the non-compressed version
+    console.log(`[storeFeedMapping] Calling ensurePrimaryAndReplicate for regular key ${regularKey} (source: ${clientName})`);
+    await ensurePrimaryAndReplicate(activeUrl, regularKey, stringValue, DEFAULT_CACHE_TTL);
+
+
+    // --- 2. Store the compressed version IF needed ---
     if (shouldCompress(stringValue)) {
-      console.log(`Compressing large feed mapping for ${feedId} (${Buffer.byteLength(stringValue, 'utf8')} bytes)`);
+      console.log(`[storeFeedMapping] Compressing large feed mapping for ${feedId} (${Buffer.byteLength(stringValue, 'utf8')} bytes)`);
       const compressed = await gzip(stringValue);
       const base64Compressed = compressed.toString('base64');
 
-      keyToStore = `${feedId}:compressed`;
-      valueToStore = base64Compressed;
-      isCompressed = true;
+      console.log(`[storeFeedMapping] Attempting initial SET for compressed key ${compressedKey} to ${clientName}`);
+      await redis.set(compressedKey, base64Compressed, "EX", DEFAULT_CACHE_TTL);
+      console.log(`[storeFeedMapping] SUCCESS: Stored compressed mapping (${base64Compressed.length} bytes) to ${clientName}`);
 
-      // Store with compression flag on the active client
-      console.log(`[storeFeedMapping] Attempting initial SET (compressed) for key ${keyToStore} to ${getRedisName(activeUrl)}`);
-      await redis.set(keyToStore, valueToStore, "EX", DEFAULT_CACHE_TTL);
-      console.log(`[storeFeedMapping] SUCCESS: Stored compressed mapping (${valueToStore.length} bytes) to ${getRedisName(activeUrl)}`);
+      // Replicate the compressed version
+      console.log(`[storeFeedMapping] Calling ensurePrimaryAndReplicate for compressed key ${compressedKey} (source: ${clientName})`);
+      await ensurePrimaryAndReplicate(activeUrl, compressedKey, base64Compressed, DEFAULT_CACHE_TTL);
 
     } else {
-      // Use standard set operations without compression on the active client
-      console.log(`[storeFeedMapping] Attempting initial SET for key ${keyToStore} to ${getRedisName(activeUrl)}`);
-      await redis.set(keyToStore, valueToStore, "EX", DEFAULT_CACHE_TTL);
-      console.log(`[storeFeedMapping] SUCCESS: Stored mapping for feed ${feedId} to ${getRedisName(activeUrl)}`);
+      console.log(`[storeFeedMapping] Skipping compressed storage for ${feedId} (data size below threshold).`);
+      // Optional: If a compressed version might exist from a previous larger save, delete it
+      // console.log(`[storeFeedMapping] Attempting to delete potentially stale compressed key ${compressedKey} on ${clientName}`);
+      // await redis.del(compressedKey).catch(err => console.warn(`Failed to delete stale compressed key ${compressedKey}:`, err));
+      // // Also replicate the deletion
+      // console.log(`[storeFeedMapping] Calling ensurePrimaryAndReplicate for DELETE of compressed key ${compressedKey}`);
+      // await ensurePrimaryAndReplicate(activeUrl, compressedKey, '', 0); // Use TTL 0 or a specific marker for deletion if needed
     }
 
-    // Ensure data is on primary and replicate to others
-    // Use the key/value that were actually stored (potentially compressed)
-    console.log(`[storeFeedMapping] Calling ensurePrimaryAndReplicate for key ${keyToStore} (source: ${getRedisName(activeUrl)})`);
-    await ensurePrimaryAndReplicate(activeUrl, keyToStore, valueToStore, DEFAULT_CACHE_TTL);
-
-    console.log(`[storeFeedMapping] Successfully processed storage and replication for feed ${feedId}`);
+    console.log(`[storeFeedMapping] Successfully processed storage and replication for feed ${feedId} (both versions if applicable)`);
 
   } catch (error) {
     // Log the specific error during the initial write attempt
-    console.error(`[storeFeedMapping] CRITICAL ERROR storing feed mapping for ${feedId} (key: ${keyToStore}):`, error);
-    // Consider if the error happened during initial write or replication
-    // If initial write failed, ensurePrimaryAndReplicate wouldn't have run
+    // Note: Error could happen during either set operation or replication call
+    console.error(`[storeFeedMapping] CRITICAL ERROR storing feed mapping for ${feedId}:`, error);
     throw error; // Re-throw the error after logging
   }
 }
@@ -389,70 +394,116 @@ export async function storeFeedMapping(
 export async function getFeedMapping(
   feedId: string
 ): Promise<FeedMapping | null> {
+  console.log(`[getFeedMapping] Attempting to get mapping for feedId: ${feedId}`);
   try {
     // Try primary first
-    const { client, url } = await getRedisClient();
-    
+    const { client, url: clientUrl } = await getRedisClient();
+    const clientName = getRedisName(clientUrl);
+    console.log(`[getFeedMapping] Using client: ${clientName} (${clientUrl})`);
+
     // Check for compressed version first
     const compressedKey = `${feedId}:compressed`;
+    console.log(`[getFeedMapping] Checking for compressed key: ${compressedKey} on ${clientName}`);
     const compressedData = await client.get(compressedKey);
-    
+
     if (compressedData) {
-      console.log(`Found compressed data for ${feedId}`);
+      console.log(`[getFeedMapping] SUCCESS: Found compressed data for ${feedId} on ${clientName}`);
       try {
         // Decompress and parse
         const buffer = Buffer.from(compressedData, 'base64');
         const decompressed = await gunzip(buffer);
         const data = JSON.parse(decompressed.toString());
-        
+
         // Reset expiration
+        console.log(`[getFeedMapping] Resetting TTL for compressed key ${compressedKey} on ${clientName}`);
         await client.expire(compressedKey, DEFAULT_CACHE_TTL);
-        
+
         return {
           slugs: data.slugs,
           lang: data.lang
         };
       } catch (error) {
-        console.error(`Error decompressing data for ${feedId}:`, error);
+        console.error(`[getFeedMapping] Error decompressing data for ${feedId} from ${clientName}:`, error);
         // Fall through to try uncompressed version
       }
+    } else {
+        console.log(`[getFeedMapping] No compressed key found for ${feedId} on ${clientName}.`);
     }
-    
+
     // If no compressed version, try regular key
-    let jsonString = await client.get(feedId);
-    
-    // If not found in primary but we have replicas, check them
+    const regularKey = feedId;
+    console.log(`[getFeedMapping] Checking for regular key: ${regularKey} on ${clientName}`);
+    let jsonString = await client.get(regularKey);
+
+    if (jsonString) {
+        console.log(`[getFeedMapping] SUCCESS: Found regular key ${regularKey} on ${clientName}`);
+    }
+
+    // If not found in the current client AND the client was the primary, check replicas
     if (!jsonString && REPLICA_URLS.length > 0 && client === primaryClient) {
-      console.log(`Key ${feedId} not found in primary, checking replicas...`);
-      
+      console.log(`[getFeedMapping] Key ${regularKey} not found on PRIMARY, checking replicas...`);
+
       // Try each replica
-      for (const [url, replicaClient] of replicaClients.entries()) {
+      for (const [replicaUrl, replicaClient] of replicaClients.entries()) {
+         const replicaName = getRedisName(replicaUrl);
         if (replicaClient.status === "ready") {
           try {
-            jsonString = await replicaClient.get(feedId);
-            if (jsonString) {
-              console.log(`Found key ${feedId} in replica ${getRedisName(url)}`);
-              
-              // Sync this key back to primary for future requests
-              if (primaryClient && primaryClient.status === "ready") {
-                primaryClient.set(feedId, jsonString, "EX", DEFAULT_CACHE_TTL)
-                  .catch(err => console.error(`Failed to sync key ${feedId} to primary:`, err));
-              }
-              
-              break;
+            console.log(`[getFeedMapping] Checking replica ${replicaName} for key ${regularKey}`);
+            // Check compressed key on replica first
+            const replicaCompressedData = await replicaClient.get(compressedKey);
+            if (replicaCompressedData) {
+                console.log(`[getFeedMapping] SUCCESS: Found COMPRESSED key ${compressedKey} on REPLICA ${replicaName}`);
+                 try {
+                    const buffer = Buffer.from(replicaCompressedData, 'base64');
+                    const decompressed = await gunzip(buffer);
+                    const data = JSON.parse(decompressed.toString());
+                    // Sync back to primary
+                    if (primaryClient && primaryClient.status === "ready") {
+                        console.log(`[getFeedMapping] Syncing COMPRESSED key ${compressedKey} from ${replicaName} back to PRIMARY`);
+                        primaryClient.set(compressedKey, replicaCompressedData, "EX", DEFAULT_CACHE_TTL)
+                          .catch(err => console.error(`[getFeedMapping] Failed to sync compressed key ${compressedKey} to primary:`, err));
+                    }
+                    return { slugs: data.slugs, lang: data.lang };
+                 } catch (error) {
+                    console.error(`[getFeedMapping] Error decompressing data for ${feedId} from REPLICA ${replicaName}:`, error);
+                 }
+            } else {
+                 console.log(`[getFeedMapping] No compressed key found on replica ${replicaName}. Checking regular key ${regularKey}...`);
+                 jsonString = await replicaClient.get(regularKey);
+                 if (jsonString) {
+                   console.log(`[getFeedMapping] SUCCESS: Found REGULAR key ${regularKey} on REPLICA ${replicaName}`);
+
+                   // Sync this key back to primary for future requests
+                   if (primaryClient && primaryClient.status === "ready") {
+                     console.log(`[getFeedMapping] Syncing REGULAR key ${regularKey} from ${replicaName} back to PRIMARY`);
+                     primaryClient.set(regularKey, jsonString, "EX", DEFAULT_CACHE_TTL)
+                       .catch(err => console.error(`[getFeedMapping] Failed to sync regular key ${regularKey} to primary:`, err));
+                   }
+
+                   break; // Found on this replica, stop checking others
+                 } else {
+                    console.log(`[getFeedMapping] No regular key found on replica ${replicaName}.`);
+                 }
             }
+
           } catch (error) {
-            console.error(`Error checking replica ${getRedisName(url)} for ${feedId}:`, error);
+            console.error(`[getFeedMapping] Error checking replica ${replicaName} for ${feedId}:`, error);
           }
+        } else {
+            console.log(`[getFeedMapping] Skipping replica ${replicaName} (status: ${replicaClient.status})`);
         }
       }
     }
-    
-    if (!jsonString) return null;
-    
-    // Reset expiration on access
-    await client.expire(feedId, DEFAULT_CACHE_TTL);
-    
+
+    if (!jsonString) {
+        console.log(`[getFeedMapping] Key ${feedId} (and compressed variant) not found on any checked instance.`);
+        return null;
+    }
+
+    // Reset expiration on access (only if found via regular key initially or synced from replica)
+    console.log(`[getFeedMapping] Resetting TTL for regular key ${regularKey} on ${clientName}`);
+    await client.expire(regularKey, DEFAULT_CACHE_TTL);
+
     // Parse the result
     const data = JSON.parse(jsonString as string);
     return {
@@ -460,7 +511,7 @@ export async function getFeedMapping(
       lang: data.lang
     };
   } catch (error) {
-    console.error(`Error retrieving feed mapping for ${feedId}:`, error);
+    console.error(`[getFeedMapping] CRITICAL ERROR retrieving feed mapping for ${feedId}:`, error);
     return null;
   }
 }
@@ -703,20 +754,24 @@ export async function getBatchFeedMappings(
 
 /**
  * Ensures data is written to the primary (if not the source) and replicated.
- * Logs sync attempts and outcomes without throwing errors for replication failures.
+ * Handles SET operations. For DEL, a separate function or modification might be needed.
  */
 async function ensurePrimaryAndReplicate(
   sourceUrl: string,
   key: string,
-  value: string,
-  ttl: number
+  value: string, // Value to set
+  ttl: number // TTL for SET, use > 0
 ): Promise<void> {
   const replicationTasks: Promise<any>[] = [];
   const sourceName = getRedisName(sourceUrl);
   const primaryUrl = PRIMARY_REDIS_URL;
   const primaryName = getRedisName(primaryUrl!);
 
-  console.log(`[ensurePrimaryAndReplicate] Starting sync for key ${key}. Source: ${sourceName}`);
+  // Check if operation is a delete based on TTL (simple approach)
+  const isDelete = ttl <= 0;
+  const operationType = isDelete ? 'DELETE' : 'SET';
+
+  console.log(`[ensurePrimaryAndReplicate] Starting sync for ${operationType} on key ${key}. Source: ${sourceName}`);
 
   // 1. Sync to Primary (if source wasn't primary and primary exists/is healthy)
   if (primaryClient && sourceUrl !== primaryUrl) {
@@ -735,23 +790,27 @@ async function ensurePrimaryAndReplicate(
     }
 
     if (primaryIsReady) {
-      console.log(`[ensurePrimaryAndReplicate] Attempting sync to PRIMARY (${primaryName}) for key ${key}`);
+      console.log(`[ensurePrimaryAndReplicate] Attempting sync ${operationType} to PRIMARY (${primaryName}) for key ${key}`);
+      const task = isDelete
+        ? primaryClient.del(key)
+        : primaryClient.set(key, value, "EX", ttl);
+
       replicationTasks.push(
-        primaryClient.set(key, value, "EX", ttl)
-          .then(() => console.log(`[ensurePrimaryAndReplicate] SUCCESS: Synced key ${key} to PRIMARY (${primaryName})`))
-          .catch(err => console.error(`[ensurePrimaryAndReplicate] FAILED: Sync key ${key} to PRIMARY (${primaryName})`, err))
+        task
+          .then(() => console.log(`[ensurePrimaryAndReplicate] SUCCESS: Synced ${operationType} key ${key} to PRIMARY (${primaryName})`))
+          .catch(err => console.error(`[ensurePrimaryAndReplicate] FAILED: Sync ${operationType} key ${key} to PRIMARY (${primaryName})`, err))
       );
     } else {
-       console.log(`[ensurePrimaryAndReplicate] SKIPPED: Sync to PRIMARY (${primaryName}) because it's not ready (Status: ${primaryStatus}).`);
+       console.log(`[ensurePrimaryAndReplicate] SKIPPED: Sync ${operationType} to PRIMARY (${primaryName}) because it's not ready (Status: ${primaryStatus}).`);
     }
   } else if (sourceUrl === primaryUrl) {
-      console.log(`[ensurePrimaryAndReplicate] Source was PRIMARY (${primaryName}), no primary sync needed for key ${key}.`);
+      console.log(`[ensurePrimaryAndReplicate] Source was PRIMARY (${primaryName}), no primary sync needed for ${operationType} on key ${key}.`);
   } else {
-      console.log(`[ensurePrimaryAndReplicate] Primary client not available, cannot sync key ${key} to primary.`);
+      console.log(`[ensurePrimaryAndReplicate] Primary client not available, cannot sync ${operationType} key ${key} to primary.`);
   }
 
   // 2. Replicate to other available replicas
-  console.log(`[ensurePrimaryAndReplicate] Checking ${replicaClients.size} replicas for key ${key}`);
+  console.log(`[ensurePrimaryAndReplicate] Checking ${replicaClients.size} replicas for ${operationType} on key ${key}`);
   for (const [replicaUrl, replicaClient] of replicaClients.entries()) {
     const replicaName = getRedisName(replicaUrl);
     // Don't replicate back to the source or to the primary (if primary sync was attempted above)
@@ -759,27 +818,30 @@ async function ensurePrimaryAndReplicate(
        const replicaStatus = replicaClient.status;
        console.log(`[ensurePrimaryAndReplicate] Checking replica ${replicaName} status: ${replicaStatus}`);
       if (replicaStatus === 'ready') {
-        console.log(`[ensurePrimaryAndReplicate] Attempting replication to REPLICA (${replicaName}) for key ${key}`);
+        console.log(`[ensurePrimaryAndReplicate] Attempting replication ${operationType} to REPLICA (${replicaName}) for key ${key}`);
+         const task = isDelete
+            ? replicaClient.del(key)
+            : replicaClient.set(key, value, "EX", ttl);
         replicationTasks.push(
-          replicaClient.set(key, value, "EX", ttl)
-            .then(() => console.log(`[ensurePrimaryAndReplicate] SUCCESS: Replicated key ${key} to REPLICA (${replicaName})`))
-            .catch(err => console.error(`[ensurePrimaryAndReplicate] FAILED: Replicate key ${key} to REPLICA (${replicaName})`, err))
+          task
+            .then(() => console.log(`[ensurePrimaryAndReplicate] SUCCESS: Replicated ${operationType} key ${key} to REPLICA (${replicaName})`))
+            .catch(err => console.error(`[ensurePrimaryAndReplicate] FAILED: Replicate ${operationType} key ${key} to REPLICA (${replicaName})`, err))
         );
       } else {
-         console.log(`[ensurePrimaryAndReplicate] SKIPPED: Replication to REPLICA (${replicaName}) because it's not ready (Status: ${replicaStatus}).`);
+         console.log(`[ensurePrimaryAndReplicate] SKIPPED: Replication ${operationType} to REPLICA (${replicaName}) because it's not ready (Status: ${replicaStatus}).`);
       }
     } else {
-        console.log(`[ensurePrimaryAndReplicate] SKIPPED: Replication to ${replicaName} (Source or Primary) for key ${key}.`);
+        console.log(`[ensurePrimaryAndReplicate] SKIPPED: Replication ${operationType} to ${replicaName} (Source or Primary) for key ${key}.`);
     }
   }
 
   // Wait for all sync/replication attempts to settle
   if (replicationTasks.length > 0) {
-    console.log(`[ensurePrimaryAndReplicate] Waiting for ${replicationTasks.length} sync/replication tasks for key ${key}...`);
+    console.log(`[ensurePrimaryAndReplicate] Waiting for ${replicationTasks.length} sync/replication tasks for ${operationType} on key ${key}...`);
     const results = await Promise.allSettled(replicationTasks);
-    console.log(`[ensurePrimaryAndReplicate] Sync/replication tasks settled for key ${key}. Results:`, results.map(r => r.status));
+    console.log(`[ensurePrimaryAndReplicate] Sync/replication tasks settled for ${operationType} on key ${key}. Results:`, results.map(r => r.status));
   } else {
-     console.log(`[ensurePrimaryAndReplicate] No sync/replication tasks needed for key ${key}.`);
+     console.log(`[ensurePrimaryAndReplicate] No sync/replication tasks needed for ${operationType} on key ${key}.`);
   }
 }
 
