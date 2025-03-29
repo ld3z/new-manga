@@ -1,0 +1,290 @@
+---
+import ThemeToggle from '../components/ThemeToggle.astro';
+import Analytics from '@vercel/analytics/astro';
+import { getRandomBackground } from '../config/backgrounds';
+import AnnouncementBanner from '../components/AnnouncementBanner.astro';
+
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const { 
+  title,
+  description = "Discover and track your favorite comics with ComicK-RSS" 
+} = Astro.props;
+
+const background = getRandomBackground();
+const canonicalURL = new URL(Astro.url.pathname, Astro.site ?? 'https://comick-rss.vercel.app').toString();
+const isCreditsPage = Astro.url.pathname === '/credits';
+
+// Add the announcement configuration
+const announcement = {
+  message: "Your custom feed may have been affected.",
+  type: "info" as const,
+  dismissible: true,
+  link: {
+    text: "Find out what happened here",
+    url: "https://status-6cv.pages.dev/issues/2025_02_28_database-failure-2-20/"
+  }
+};
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="canonical" href={canonicalURL} />
+    
+    <!-- Primary Meta Tags -->
+    <title>{title}</title>
+    <meta name="title" content={title} />
+    <meta name="description" content={description} />
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonicalURL} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:url" content={canonicalURL} />
+    <meta property="twitter:title" content={title} />
+    <meta property="twitter:description" content={description} />
+    
+    <meta name="generator" content={Astro.generator} />
+  </head>
+  <body 
+    class={`min-h-screen bg-primary text-primary before:fixed before:inset-0 before:bg-[url('${background.url}')] before:bg-cover before:bg-center before:bg-no-repeat before:opacity-30 before:-z-10 before:transition-all before:duration-300`} 
+    id="body-element"
+    style={`--bg-url: url('${background.url}')`}
+  >
+    <!-- Add the banner right after body opening tag -->
+    <AnnouncementBanner announcement={announcement} />
+    
+    {!isCreditsPage && (
+      <div class="fixed bottom-4 sm:bottom-6 right-4 sm:right-6 z-50">
+        <div class="relative" id="settings-dropdown">
+          <button
+            id="settings-button"
+            class="p-2.5 sm:p-3 bg-secondary rounded-lg hover:bg-hover transition-all duration-200 shadow-lg border border-hover/30 flex items-center gap-2 hover:-translate-y-0.5"
+            aria-label="Settings"
+          >
+            <svg class="w-4 h-4 sm:w-5 sm:h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
+              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z" />
+            </svg>
+            <span class="text-xs sm:text-sm">Settings</span>
+          </button>
+
+          <div id="dropdown-menu" class="hidden absolute bottom-full right-0 mb-2 w-56 sm:w-64 bg-secondary rounded-lg shadow-lg border border-hover/30">
+            <div class="p-4 space-y-4">
+              <div class="flex items-center justify-between">
+                <span class="text-sm">Theme</span>
+                <button 
+                  id="theme-toggle" 
+                  class="relative w-12 h-6 rounded-full bg-hover transition-colors"
+                  aria-label="Toggle theme"
+                >
+                  <span class="absolute left-1 top-1 w-4 h-4 rounded-full bg-primary transition-transform duration-200"></span>
+                </button>
+              </div>
+
+              <div class="flex items-center justify-between">
+                <span class="text-sm">Card Visibility</span>
+                <button 
+                  id="toggle-content" 
+                  class="relative w-12 h-6 rounded-full bg-hover transition-colors"
+                  aria-label="Toggle card visibility"
+                >
+                  <span class="absolute left-1 top-1 w-4 h-4 rounded-full bg-primary transition-transform duration-200"></span>
+                </button>
+              </div>
+
+              <div class="border-t border-hover/30 pt-4">
+                <a 
+                  href="/credits"
+                  class="flex items-center gap-2 text-sm hover:text-accent transition-colors"
+                >
+                  <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+                  </svg>
+                  Credits
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+    <main id="main-content" class="transition-opacity duration-300">
+      <slot />
+    </main>
+    <Analytics />
+  </body>
+</html>
+
+<script>
+  const settingsButton = document.getElementById('settings-button');
+  const dropdownMenu = document.getElementById('dropdown-menu');
+  const themeToggle = document.getElementById('theme-toggle');
+  const toggleContent = document.getElementById('toggle-content');
+  const mainContent = document.getElementById('main-content');
+  const bodyElement = document.getElementById('body-element');
+
+  // Theme toggle functionality
+  const updateThemeToggle = (theme: string) => {
+    const toggleButton = themeToggle?.querySelector('span');
+    if (toggleButton) {
+      toggleButton.style.transform = theme === 'dark' ? 'translateX(24px)' : 'translateX(0)';
+    }
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+  };
+
+  // Content visibility functionality
+  let isVisible = true;
+  const updateContentVisibility = () => {
+    const toggleButton = toggleContent?.querySelector('span');
+    if (toggleButton) {
+      toggleButton.style.transform = isVisible ? 'translateX(0)' : 'translateX(24px)';
+    }
+    if (mainContent) {
+      mainContent.style.opacity = isVisible ? '1' : '0';
+      mainContent.style.pointerEvents = isVisible ? 'auto' : 'none';
+    }
+    if (bodyElement) {
+      bodyElement.style.setProperty('--tw-blur', isVisible ? 'blur(2px)' : 'blur(0)');
+      bodyElement.style.setProperty('--tw-bg-opacity', isVisible ? '0.3' : '1');
+    }
+  };
+
+  // Add theme initialization to prevent flash of wrong theme
+  const themeScript = `
+    const theme = localStorage.getItem('theme') ?? 
+      (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', theme);
+  `;
+
+  // Event listeners
+  settingsButton?.addEventListener('click', () => {
+    dropdownMenu?.classList.toggle('hidden');
+  });
+
+  themeToggle?.addEventListener('click', () => {
+    const currentTheme = document.documentElement.getAttribute('data-theme');
+    const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+    updateThemeToggle(newTheme);
+  });
+
+  toggleContent?.addEventListener('click', () => {
+    isVisible = !isVisible;
+    updateContentVisibility();
+  });
+
+  // Close dropdown when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!settingsButton?.contains(e.target as Node) && !dropdownMenu?.contains(e.target as Node)) {
+      dropdownMenu?.classList.add('hidden');
+    }
+  });
+</script>
+
+<style is:global>
+  :root {
+    --accent: 136, 58, 234;
+    --accent-light: 224, 204, 250;
+    --accent-dark: 49, 10, 101;
+    --accent-gradient: linear-gradient(
+      45deg,
+      rgb(var(--accent)),
+      rgb(var(--accent-light)) 30%,
+      white 60%
+    );
+  }
+
+  /* Light theme */
+  :root[data-theme="light"] {
+    --bg-primary: #ffffff;
+    --bg-secondary: #f0f0f0;
+    --bg-hover: #e0e0e0;
+    --text-color: #13151a;
+    --accent: 89, 0, 255;        /* Brighter, more saturated purple */
+    --accent-light: 124, 58, 237;
+    --accent-dark: 76, 29, 149;
+    --accent-bg: 89, 0, 255;     /* Same as accent for bg */
+    --accent-text: 255, 255, 255; /* White text for contrast */
+  }
+
+  /* Dark theme */
+  :root[data-theme="dark"] {
+    --bg-primary: #13151a;
+    --bg-secondary: #23262d;
+    --bg-hover: #2a2d35;
+    --text-color: #ffffff;
+    --accent: 136, 58, 234;
+    --accent-light: 224, 204, 250;
+    --accent-dark: 49, 10, 101;
+    --accent-bg: 136, 58, 234;    /* Same as accent for bg */
+    --accent-text: 255, 255, 255; /* White text for contrast */
+  }
+
+  /* Default to dark theme if no data-theme is set */
+  :root:not([data-theme]) {
+    --bg-primary: #13151a;
+    --bg-secondary: #23262d;
+    --bg-hover: #2a2d35;
+    --text-color: #ffffff;
+    --accent: 136, 58, 234;
+    --accent-light: 224, 204, 250;
+    --accent-dark: 49, 10, 101;
+    --accent-bg: 136, 58, 234;
+    --accent-text: 255, 255, 255;
+  }
+
+  html {
+    font-family: system-ui, sans-serif;
+    scroll-behavior: smooth;
+  }
+
+  code {
+    font-family:
+      Menlo,
+      Monaco,
+      Lucida Console,
+      Liberation Mono,
+      DejaVu Sans Mono,
+      Bitstream Vera Sans Mono,
+      Courier New,
+      monospace;
+  }
+
+  /* Loading animation */
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .5; }
+  }
+
+  .animate-pulse {
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  @keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-3px); }
+  }
+
+  .animate-bounce {
+    animation: bounce 1s infinite;
+  }
+</style>
+
+<style define:vars={{ bgUrl: background.url }}>
+  body::before {
+    background-image: var(--bg-url);
+    transition: background-image 0.5s ease-in-out;
+  }
+</style>

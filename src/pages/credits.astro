@@ -1,0 +1,142 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { backgrounds } from '../config/backgrounds';
+
+const title = "ComicK-RSS - Credits";
+const description = "Credits and attributions for ComicK-RSS";
+
+const credits = [
+  {
+    title: "Background Art",
+    items: backgrounds.map(bg => ({
+      name: bg.title,
+      artist: bg.artist,
+      link: bg.source,
+      description: "Beautiful artwork used as site background",
+      socials: bg.socials
+    }))
+  },
+  {
+    title: "Technologies",
+    items: [
+      {
+        name: "Astro",
+        description: "The modern web framework powering this site",
+        link: "https://astro.build"
+      },
+      {
+        name: "Tailwind CSS",
+        description: "Utility-first CSS framework for styling",
+        link: "https://tailwindcss.com"
+      }
+    ]
+  },
+  {
+    title: "Data",
+    items: [
+      {
+        name: "ComicK",
+        description: "For providing the comic data and images through their API",
+        link: "https://comick.io"
+      }
+    ]
+  }
+];
+---
+
+<Layout title={title} description={description}>
+  <main class="mx-auto px-4 sm:px-6 lg:px-8 max-w-[800px] py-12">
+    <div class="mb-8">
+      <a 
+        href="/en/sfw/all" 
+        class="inline-flex items-center gap-2 text-primary hover:text-accent transition-colors"
+      >
+        <svg 
+          class="w-5 h-5" 
+          viewBox="0 0 24 24" 
+          fill="none" 
+          stroke="currentColor" 
+          stroke-width="2"
+        >
+          <path d="M19 12H5M12 19l-7-7 7-7"/>
+        </svg>
+        <span>Back to Home</span>
+      </a>
+    </div>
+
+    <h1 class="text-5xl font-bold text-center mb-12 text-primary">
+      Credits
+    </h1>
+    
+    <div class="space-y-12">
+      {credits.map((section) => (
+        <section class="bg-secondary/50 p-8 rounded-xl shadow-lg backdrop-blur-sm border border-hover/20">
+          <h2 class="text-3xl font-bold mb-6 text-accent">{section.title}</h2>
+          
+          <div class="space-y-6">
+            {section.items.map((item) => (
+              <div class="border-l-4 border-accent/30 pl-6 py-2 hover:border-accent transition-colors">
+                <h3 class="font-medium text-xl mb-2">
+                  <a 
+                    href={item.link} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    class="text-primary hover:text-accent transition-colors inline-flex items-center gap-2"
+                  >
+                    {item.name}
+                    <svg 
+                      class="w-4 h-4 opacity-50" 
+                      viewBox="0 0 24 24" 
+                      fill="none" 
+                      stroke="currentColor" 
+                      stroke-width="2"
+                    >
+                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                      <polyline points="15 3 21 3 21 9" />
+                      <line x1="10" y1="14" x2="21" y2="3" />
+                    </svg>
+                  </a>
+                </h3>
+                {item.artist && (
+                  <p class="text-primary/70 mb-1">
+                    Artist: <span class="text-accent">{item.artist}</span>
+                  </p>
+                )}
+                {item.description && (
+                  <p class="text-primary/60 leading-relaxed">{item.description}</p>
+                )}
+                {item.socials && (
+                  <div class="flex gap-4 mt-2">
+                    {item.socials.map((social) => (
+                      <a
+                        href={social.link}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="text-sm text-accent/70 hover:text-accent transition-colors inline-flex items-center gap-1"
+                      >
+                        <svg 
+                          class="w-4 h-4" 
+                          viewBox="0 0 24 24" 
+                          fill="currentColor"
+                        >
+                          <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                        </svg>
+                        {social.name}
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+
+    <div class="mt-12 text-center text-primary/60">
+      <p class="text-lg">
+        Thank you to all the creators, artists, and contributors to other projects who made this project possible! ✨
+      </p>
+    </div>
+  </main>
+</Layout> 
