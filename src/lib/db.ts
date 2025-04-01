@@ -654,66 +654,80 @@ export async function getFeedMapping(
 
 /**
  * Pre-warm the chapter cache for better performance
- * This function checks cache status and uses the getChaptersForSlugs function from api.ts 
- * to fetch and cache data in the background
+ * This function checks cache status and uses the getChaptersForSlugs function from api.ts
+ * to fetch and cache data in the background, processing only a limited batch at a time.
  */
 export async function warmChapterCache(
   slugs: string[],
   lang: string
 ): Promise<void> {
+  const BATCH_SIZE = 10; // Define the maximum number of slugs to process per run
+
   try {
-    console.log(`Warming chapter cache for ${slugs.length} comics in ${lang}`);
+    console.log(`[warmChapterCache] Received request to warm cache for ${slugs.length} comics in ${lang}`);
     const { client } = await getRedisClient(); // This already handles failover
-    
+
     // Validate slugs
-    const validSlugs = slugs.filter(slug => 
+    const validSlugs = slugs.filter(slug =>
       slug && typeof slug === 'string' && slug.match(/^[a-z0-9-]+$/));
-    
+
     if (validSlugs.length !== slugs.length) {
-      console.warn(`Filtered out ${slugs.length - validSlugs.length} invalid slugs`);
+      console.warn(`[warmChapterCache] Filtered out ${slugs.length - validSlugs.length} invalid slugs`);
     }
-    
+    if (validSlugs.length === 0) {
+        console.log("[warmChapterCache] No valid slugs provided.");
+        return;
+    }
+
     // Check which slugs are already in cache
     const pipeline = client.pipeline();
     const cacheKeys = validSlugs.map(slug => `chapters:${slug}:${lang}`);
-    
+
     cacheKeys.forEach(key => {
       pipeline.exists(key);
     });
-    
+
     const results = await pipeline.exec();
-    const slugsToFetch: string[] = [];
-    
+    let slugsMissingFromCache: string[] = []; // Renamed for clarity
+
     results?.forEach(([err, exists], index) => {
       if (err) {
-        console.error(`Error checking cache for ${cacheKeys[index]}:`, err);
-        slugsToFetch.push(validSlugs[index]);
+        console.error(`[warmChapterCache] Error checking cache for ${cacheKeys[index]}:`, err);
+        // Optionally decide if you still want to try fetching on error
+        // slugsMissingFromCache.push(validSlugs[index]);
       } else if (!exists) {
-        slugsToFetch.push(validSlugs[index]);
+        slugsMissingFromCache.push(validSlugs[index]);
       }
     });
-    
-    if (slugsToFetch.length === 0) {
-      console.log('All chapters already in cache, no warming needed');
+
+    if (slugsMissingFromCache.length === 0) {
+      console.log('[warmChapterCache] All requested chapters already in cache, no warming needed.');
       return;
     }
-    
-    console.log(`Cache miss for ${slugsToFetch.length} comics - starting background fetch`);
-    
+
+    // --- Batching Logic ---
+    const slugsToProcessNow = slugsMissingFromCache.slice(0, BATCH_SIZE);
+    const remainingSlugs = slugsMissingFromCache.length - slugsToProcessNow.length;
+
+    console.log(`[warmChapterCache] Cache miss for ${slugsMissingFromCache.length} comics. Processing batch of ${slugsToProcessNow.length}. Remaining: ${remainingSlugs}`);
+    // --- End Batching Logic ---
+
+
     // To avoid circular dependencies, we'll import getChaptersForSlugs dynamically
     const { getChaptersForSlugs } = await import('./api');
-    
-    // Start fetching in the background without waiting for the result
-    getChaptersForSlugs(slugsToFetch, lang)
+
+    // Start fetching in the background *only for the current batch* without waiting for the result
+    getChaptersForSlugs(slugsToProcessNow, lang) // Use the batched list
       .then(chapters => {
-        console.log(`Successfully warmed cache with ${chapters.length} chapters`);
+        // Note: chapters.length might not equal slugsToProcessNow.length if some fetches failed internally
+        console.log(`[warmChapterCache] Background cache warming initiated for ${slugsToProcessNow.length} slugs. Successfully fetched data for ${chapters.length} chapters.`);
       })
       .catch(error => {
-        console.error('Error warming chapter cache:', error);
+        console.error('[warmChapterCache] Error during background chapter cache warming:', error);
       });
 
   } catch (error) {
-    console.error('Error in warmChapterCache:', error);
+    console.error('[warmChapterCache] Error in warmChapterCache:', error);
   }
 }
 
