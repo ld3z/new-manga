@@ -1,5 +1,5 @@
 import Redis from "ioredis";
-import type { FeedMapping } from "./types";
+import type { FeedMapping, ChapterDetail } from "./types";
 import { ReJSON } from 'redis-modules-sdk';
 import * as zlib from 'zlib';
 import { promisify } from 'util';
@@ -653,18 +653,18 @@ export async function getFeedMapping(
 }
 
 /**
- * Pre-warm the chapter cache for better performance
- * This function checks cache status and uses the getChaptersForSlugs function from api.ts
- * to fetch and cache data in the background, processing only a limited batch at a time.
+ * Fetches and caches a batch of chapters if they are missing from the cache.
+ * Returns the chapter data for the processed batch.
+ * Processes a maximum of BATCH_SIZE comics per call.
  */
 export async function warmChapterCache(
   slugs: string[],
   lang: string
-): Promise<void> {
-  const BATCH_SIZE = 10; // Define the maximum number of slugs to process per run
+): Promise<ChapterDetail[]> {
+  const BATCH_SIZE = 5; // Define the maximum number of slugs to process per run
 
   try {
-    console.log(`[warmChapterCache] Received request to warm cache for ${slugs.length} comics in ${lang}`);
+    console.log(`[warmChapterCache] Received request to fetch/warm cache for ${slugs.length} comics in ${lang}`);
     const { client } = await getRedisClient(); // This already handles failover
 
     // Validate slugs
@@ -676,7 +676,7 @@ export async function warmChapterCache(
     }
     if (validSlugs.length === 0) {
         console.log("[warmChapterCache] No valid slugs provided.");
-        return;
+        return []; // Return empty array if no valid slugs
     }
 
     // Check which slugs are already in cache
@@ -688,12 +688,12 @@ export async function warmChapterCache(
     });
 
     const results = await pipeline.exec();
-    let slugsMissingFromCache: string[] = []; // Renamed for clarity
+    let slugsMissingFromCache: string[] = [];
 
     results?.forEach(([err, exists], index) => {
       if (err) {
         console.error(`[warmChapterCache] Error checking cache for ${cacheKeys[index]}:`, err);
-        // Optionally decide if you still want to try fetching on error
+        // Decide if you want to attempt fetching even if cache check failed
         // slugsMissingFromCache.push(validSlugs[index]);
       } else if (!exists) {
         slugsMissingFromCache.push(validSlugs[index]);
@@ -701,8 +701,11 @@ export async function warmChapterCache(
     });
 
     if (slugsMissingFromCache.length === 0) {
-      console.log('[warmChapterCache] All requested chapters already in cache, no warming needed.');
-      return;
+      console.log('[warmChapterCache] All requested chapters already in cache. No fetching needed for this request.');
+      // If all are cached, you might want to fetch them all now, or return empty
+      // Depending on the calling context's expectation. Let's return empty for now,
+      // assuming the caller will fetch cached data separately if needed.
+      return [];
     }
 
     // --- Batching Logic ---
@@ -716,18 +719,22 @@ export async function warmChapterCache(
     // To avoid circular dependencies, we'll import getChaptersForSlugs dynamically
     const { getChaptersForSlugs } = await import('./api');
 
-    // Start fetching in the background *only for the current batch* without waiting for the result
-    getChaptersForSlugs(slugsToProcessNow, lang) // Use the batched list
-      .then(chapters => {
-        // Note: chapters.length might not equal slugsToProcessNow.length if some fetches failed internally
-        console.log(`[warmChapterCache] Background cache warming initiated for ${slugsToProcessNow.length} slugs. Successfully fetched data for ${chapters.length} chapters.`);
-      })
-      .catch(error => {
-        console.error('[warmChapterCache] Error during background chapter cache warming:', error);
-      });
+    // --- Fetch the batch SYNCHRONOUSLY and return the result ---
+    console.log(`[warmChapterCache] Calling getChaptersForSlugs for batch: [${slugsToProcessNow.join(', ')}]`);
+    try {
+        const chaptersForBatch: ChapterDetail[] = await getChaptersForSlugs(slugsToProcessNow, lang); // Await the result
+        console.log(`[warmChapterCache] Successfully fetched ${chaptersForBatch.length} chapters for the batch.`);
+        // The getChaptersForSlugs function is assumed to handle caching internally
+        return chaptersForBatch; // Return the fetched data for this batch
+    } catch (fetchError) {
+        console.error(`[warmChapterCache] Error fetching chapters for batch [${slugsToProcessNow.join(', ')}]:`, fetchError);
+        return []; // Return empty array on fetch error for this batch
+    }
+    // --- End Fetch and Return ---
 
   } catch (error) {
-    console.error('[warmChapterCache] Error in warmChapterCache:', error);
+    console.error('[warmChapterCache] CRITICAL Error in warmChapterCache:', error);
+    return []; // Return empty array on critical error
   }
 }
 
