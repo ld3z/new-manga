@@ -18,7 +18,7 @@ const isNSFW = comic.md_comics.content_rating === 'erotica';
 ---
 
 <div 
-  class="bg-secondary rounded-xl overflow-hidden shadow-lg h-full flex flex-col max-w-[280px] mx-auto border border-hover/30 hover:border-accent/50 transition-all duration-300"
+  class="bg-secondary rounded-xl overflow-hidden shadow-lg h-full flex flex-col border border-hover/30 hover:border-accent/50 transition-all duration-300"
   data-genres={JSON.stringify(comic.md_comics.genres)}
   role="article"
   aria-labelledby={`comic-title-${comic.id}`}
