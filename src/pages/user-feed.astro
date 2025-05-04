@@ -1,0 +1,136 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="Generate User RSS Feed">
+  <main class="container mx-auto px-4 py-8">
+    <!-- Back button -->
+    <a 
+      href="/custom" 
+      class="inline-flex items-center gap-2 mb-6 px-4 py-2 bg-secondary hover:bg-hover rounded-md transition-colors font-medium"
+    >
+      <svg 
+        xmlns="http://www.w3.org/2000/svg" 
+        class="w-5 h-5" 
+        viewBox="0 0 24 24" 
+        fill="none" 
+        stroke="currentColor" 
+        stroke-width="2" 
+        stroke-linecap="round" 
+        stroke-linejoin="round"
+      >
+        <path d="M19 12H5M12 19l-7-7 7-7"/>
+      </svg>
+      Back to Custom Feed
+    </a>
+
+    <div class="mx-auto px-3 sm:px-4 lg:px-8 max-w-[800px] py-4 sm:py-8">
+      <h1 class="text-2xl sm:text-3xl lg:text-4xl font-bold text-center mb-4 sm:mb-8">Generate Comick User RSS Feed</h1>
+      <p class="mb-6 text-center text-primary/80">
+        Enter a Comick User ID below to generate an RSS feed link for their recently read chapters.
+      </p>
+
+      <div class="max-w-2xl mx-auto bg-secondary/50 p-6 rounded-lg shadow-lg">
+        <label for="userIdInput" class="block text-sm font-medium text-primary mb-2">Comick User ID:</label>
+        <input
+          type="text"
+          id="userIdInput"
+          placeholder="e.g., 4e996622-f879-4fd1-ba1e-dade02600555"
+          class="w-full px-3 py-2 bg-secondary border border-hover rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent mb-4 text-primary placeholder-primary/60"
+        />
+        <button 
+          id="generateButton" 
+          class="w-full bg-accent text-accent-text font-medium py-2 px-4 rounded hover:bg-accent-dark transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
+        >
+          Generate Feed Link
+        </button>
+        
+        <div id="feedLinkContainer" class="mt-4 text-center" style="display: none;">
+          <p class="text-sm text-primary/80 mb-2">Your RSS Feed Link:</p>
+          <a id="feedLink" href="#" target="_blank" class="text-accent hover:underline break-all"></a>
+          <button 
+            id="copyButton" 
+            class="ml-2 px-3 py-1 text-sm bg-secondary hover:bg-hover rounded transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
+          >
+            Copy
+          </button>
+          <p id="copyMessage" class="text-xs text-green-500 mt-2" style="display: none;">Copied to clipboard!</p>
+        </div>
+        <p id="errorMessage" class="text-red-500 text-sm mt-2 text-center" style="display: none;"></p>
+      </div>
+
+      <div class="mt-6 text-center text-primary/60 text-sm">
+        <p>This will generate an RSS feed of the user's recently read chapters.</p>
+        <p class="mt-2">The User ID can be found in their Comick profile URL.</p>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const userIdInput = document.getElementById('userIdInput') as HTMLInputElement;
+    const generateButton = document.getElementById('generateButton') as HTMLButtonElement;
+    const feedLinkContainer = document.getElementById('feedLinkContainer')!;
+    const feedLink = document.getElementById('feedLink') as HTMLAnchorElement;
+    const copyButton = document.getElementById('copyButton') as HTMLButtonElement;
+    const copyMessage = document.getElementById('copyMessage')!;
+    const errorMessage = document.getElementById('errorMessage')!;
+
+    const userIdRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+    generateButton.addEventListener('click', async () => {
+      const userId = userIdInput.value.trim();
+      errorMessage.style.display = 'none';
+      feedLinkContainer.style.display = 'none';
+
+      if (!userId) {
+        errorMessage.textContent = 'Please enter a User ID.';
+        errorMessage.style.display = 'block';
+        return;
+      }
+
+      if (!userIdRegex.test(userId)) {
+        errorMessage.textContent = 'Invalid User ID format. Please enter a valid UUID.';
+        errorMessage.style.display = 'block';
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/create-user-feed', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ userId }),
+        });
+
+        if (!response.ok) {
+          throw new Error('Failed to generate feed');
+        }
+
+        const data = await response.json();
+        const feedUrl = `${window.location.origin}/rss/user/${data.feedId}.xml`;
+        feedLink.href = feedUrl;
+        feedLink.textContent = feedUrl;
+        feedLinkContainer.style.display = 'block';
+        copyMessage.style.display = 'none';
+
+      } catch (error) {
+        errorMessage.textContent = 'Failed to generate feed. Please try again.';
+        errorMessage.style.display = 'block';
+      }
+    });
+
+    copyButton.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(feedLink.href);
+        copyMessage.style.display = 'block';
+        setTimeout(() => {
+          copyMessage.style.display = 'none';
+        }, 2000);
+      } catch (err) {
+        errorMessage.textContent = 'Failed to copy to clipboard';
+        errorMessage.style.display = 'block';
+      }
+    });
+  </script>
+</Layout>

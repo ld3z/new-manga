@@ -22,6 +22,7 @@
     "ioredis": "^5.6.1",
     "p-throttle": "^7.0.0",
     "redis-modules-sdk": "^1.4.0",
+    "sanitize-html": "^2.16.0",
     "tailwindcss": "^3.4.1"
   }
 }

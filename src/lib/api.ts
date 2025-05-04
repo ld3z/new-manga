@@ -26,6 +26,9 @@ const contentTypes = new Set(["sfw", "nsfw"]);
 const comicTypes = new Set(['manga', 'manhwa', 'manhua', 'all']);
 const urlBase = "https://api.comick.fun/chapter";
 
+// Use import.meta.env for Astro environment variables
+const SCRAPE_API_BASE_URL = import.meta.env.SCRAPE_API_BASE_URL || 'http://localhost:8000';
+
 let genreCache: Genre[] = [];
 
 const RETRY_COUNT = 3;
@@ -180,6 +183,31 @@ interface ChapterParams {
   lang?: string;
 }
 
+interface UserLastReadChapter {
+  hid: string;
+  chap: string;
+  lang: string;
+  vol: string | null;
+}
+
+interface ComicInfo {
+  slug: string;
+  user_last_read_chapter: UserLastReadChapter | null;
+  comic_latest_chapter: number;
+  user_read_at: string;
+}
+
+interface ScrapeData {
+  user_id: string;
+  limit: number;
+  comics: ComicInfo[];
+}
+
+interface ScrapeApiResponse {
+  success: boolean;
+  data: ScrapeData;
+}
+
 export async function getComicBySlug(slug: string): Promise<ComicDetail | null> {
   try {
     const response = await throttledFetch(`https://api.comick.fun/comic/${slug}`);
@@ -293,7 +321,7 @@ export async function getChaptersForSlugs(
   console.log(`Fetching chapters for ${slugs.length} comics`);
   const { client: redis } = await getRedisClient();
   
-  const uniqueSlugs = [...new Set(slugs)];
+  const uniqueSlugs = Array.from(new Set(slugs));
   const pipeline = redis.pipeline();
 
   // Check cache for all slugs
@@ -426,4 +454,40 @@ export async function validateSlugs(slugs: string[]): Promise<string[]> {
   }
   
   return validSlugs;
+}
+
+/**
+ * Fetches the comic list for a specific user from the scrape endpoint.
+ * @param userId The ID of the user.
+ * @param limit The maximum number of comics to fetch.
+ * @returns A promise that resolves to the scrape API response data.
+ */
+export async function fetchUserComics(userId: string, limit: number = 10): Promise<ScrapeData> {
+  const url = `${SCRAPE_API_BASE_URL}/scrape/${userId}?limit=${limit}`;
+  try {
+    // Using the existing throttledFetch for consistency, though rate limits might differ for local API
+    const response = await throttledFetch(url); 
+    const result: ScrapeApiResponse = await response.json();
+    if (!result.success) {
+        // Handle API-level failure indication
+        throw new Error(`Scrape API indicated failure for user ${userId}`);
+    }
+    return result.data;
+  } catch (error) {
+    console.error(`Failed to fetch user comics for ${userId}:`, error);
+    // Re-throw or return a default/error state depending on your error handling strategy
+    if (error instanceof Error) {
+        throw new APIError(
+            `Failed to fetch user comics: ${error.message}`,
+            error instanceof Response ? error.status : undefined, // Use Response type guard if available
+            url
+        );
+    } else {
+         throw new APIError(
+            'An unknown error occurred while fetching user comics',
+            undefined,
+            url
+        );
+    }
+  }
 }

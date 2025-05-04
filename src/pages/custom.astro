@@ -35,10 +35,24 @@ const description = "Create a custom RSS feed for your favorite comics";
         <SlugInput />
       </div>
 
+      <!-- Add section for User Feed link -->
+      <div class="mt-8 bg-secondary/50 p-3 sm:p-6 rounded-lg shadow-lg text-center">
+        <h2 class="text-xl font-semibold mb-3">Generate Feed from User List</h2>
+        <p class="mb-4 text-primary/80">
+          Alternatively, generate an RSS feed based on a specific Comick user's reading list.
+        </p>
+        <a 
+          href="/user-feed"
+          class="inline-block px-6 py-2 bg-accent text-accent-text rounded-md hover:bg-accent-dark transition-colors font-medium"
+        >
+          Go to User Feed Generator
+        </a>
+      </div>
+
       <div class="mt-4 sm:mt-8 text-center text-primary/60 text-sm sm:text-base">
         <p>Search for your favorite comics using the search box above, or add their slugs manually.</p>
         <p class="mt-2">Manual example: For <a href="https://comick.io/comic/01-one-piece" class="text-accent hover:underline">https://comick.io/comic/01-one-piece</a>, the slug is "01-one-piece"</p>
       </div>
     </main>
   </div>
-</Layout> 
+</Layout>

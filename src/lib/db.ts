@@ -1113,6 +1113,60 @@ async function syncFromReplicaToPrimary(replicaUrl: string): Promise<void> {
   }
 }
 
+// Add user feed mapping functions
+interface UserFeedMapping {
+  userId: string;
+  created_at: string;
+}
+
+export async function storeUserFeedMapping(
+  feedId: string,
+  userId: string
+): Promise<void> {
+  const mapping: UserFeedMapping = {
+    userId,
+    created_at: new Date().toISOString()
+  };
+
+  const stringValue = JSON.stringify(mapping);
+  const regularKey = `user:${feedId}`;
+
+  try {
+    const { client: redis, url: activeUrl } = await getRedisClient();
+    const clientName = getRedisName(activeUrl);
+
+    await redis.set(regularKey, stringValue, "EX", DEFAULT_CACHE_TTL);
+    await ensurePrimaryAndReplicate(activeUrl, regularKey, stringValue, DEFAULT_CACHE_TTL);
+
+  } catch (error) {
+    console.error(`Error storing user feed mapping for ${feedId}:`, error);
+    throw error;
+  }
+}
+
+export async function getUserFeedMapping(
+  feedId: string
+): Promise<UserFeedMapping | null> {
+  try {
+    const { client } = await getRedisClient();
+    const regularKey = `user:${feedId}`;
+    const jsonString = await client.get(regularKey);
+
+    if (!jsonString) {
+      return null;
+    }
+
+    const data = JSON.parse(jsonString);
+    return {
+      userId: data.userId,
+      created_at: data.created_at
+    };
+  } catch (error) {
+    console.error(`Error retrieving user feed mapping for ${feedId}:`, error);
+    return null;
+  }
+}
+
 // Initialize connections eagerly to establish connections as soon as possible
 if (!import.meta.env.SSR) {
   // Trigger initialization but don't block module loading
